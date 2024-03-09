@@ -229,6 +229,8 @@ class BrainPhoqueUTM(UniversalTuringMachine):
     num_steps = 0
     # Keep track of which instructions have been used
     used_instructions = [0] * len(program)
+    # Keep track of the random input symbols read (for debugging purposes)
+    input_symbols = []
 
     def make_result(status) -> Mapping[str, Union[int, str]]:
       # Build an equivalent program that contains only the instructions
@@ -247,13 +249,13 @@ class BrainPhoqueUTM(UniversalTuringMachine):
           'output_length': len(output),
           'short_program': short_program,
           'short_program_length': len(short_program),
+          'input_symbols' : input_symbols,
       }
 
     while program_index < len(program):
       command = program[program_index]
       used_instructions[program_index] += 1
       mem = memory[memory_index]
-
       match command:
         case '+':
           # Increment data cell value with wrap-around
@@ -269,7 +271,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
           # c. Clipping: values are clipped to the range
           #    [first_data_int:last_data_int].
           #    Pb: programs on average are significantly less interesting
-          #    because negative numbers are disallowed, making (more than)
+          #    because negative numbers are disallowed, making (more than)sample_params
           #    half of the programs output constant values.
           memory[memory_index] = (mem + 1) % self._alphabet_size
         case '-':
@@ -297,6 +299,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
             used_instructions[program_index] += 1
         case ',':
           random_symbol = np.random.choice(self._alphabet_size) # TODO; store on input tape
+          input_symbols.append(random_symbol)
           memory[memory_index] = random_symbol
         case _:
           raise IncorrectProgramError(
