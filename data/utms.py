@@ -271,7 +271,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
           # c. Clipping: values are clipped to the range
           #    [first_data_int:last_data_int].
           #    Pb: programs on average are significantly less interesting
-          #    because negative numbers are disallowed, making (more than)sample_params
+          #    because negative numbers are disallowed, making (more than)
           #    half of the programs output constant values.
           memory[memory_index] = (mem + 1) % self._alphabet_size
         case '-':
@@ -298,7 +298,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
             program_index = matching_brackets[program_index]
             used_instructions[program_index] += 1
         case ',':
-          random_symbol = np.random.choice(self._alphabet_size) # TODO; store on input tape
+          random_symbol = np.random.choice(self._alphabet_size)
           input_symbols.append(random_symbol)
           memory[memory_index] = random_symbol
         case _:
