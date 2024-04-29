@@ -28,25 +28,30 @@ import optax
 import tqdm
 import tree
 
-from data import data_generator as dg_lib
-from data import utm_data_generator as utm_dg_lib
-from data import utms as utms_lib
-from models import transformer
+# TODO: these dependencies belong in PR
+# from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import data_generator as dg_lib
+# from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import utm_data_generator as utm_dg_lib
+# from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import utms as utms_lib
+# from google3.third_party.deepmind.neural_networks_solomonoff_induction.models import transformer
 
+from neural_networks_solomonoff_induction.data import data_generator as dg_lib
+from neural_networks_solomonoff_induction.data import utm_data_generator as utm_dg_lib
+from neural_networks_solomonoff_induction.data import utms as utms_lib
+from neural_networks_solomonoff_induction.models import transformer
 
 def _make_loss_fn(model: hk.Transformed) -> Any:
   """Returns the loss function for update_parameters."""
 
   def loss_fn(
       params: hk.Params,
-      sequences: dg_lib.Sequences,
+      sequences: jax.Array,
       mask: jax.Array,
   ) -> jnp.float32:
     """Returns the loss for the model and the last state.
 
     Args:
       params: The parameters of the model, usually a neural network.
-      sequences: The sequences to evaluate, see type.
+      sequences: The input of sequences to evaluate. See neural_predictors.py.
       mask: A binary array, True (1's) denote where to skip computing the loss.
     """
     conditionals = model.apply(
@@ -163,7 +168,6 @@ def train_transformer_decoder(
       loss_mask = log_dict['loss_mask']
     else:
       loss_mask = default_mask(batch)
-    logging.info('Batch fetched.')
 
     params, opt_state, logs = _update_parameters(
         params=params,
@@ -175,7 +179,7 @@ def train_transformer_decoder(
     )
     if log_every > 0 and step % log_every == 0:
       logging.info(
-          'Step %f, Loss %f, Grad norm %f',
+          'Step %d, Loss (avg cumulative nats) %f, Grad norm %f',
           step,
           logs['loss'],
           logs['grad_norm_unclipped'],
@@ -187,27 +191,29 @@ def train_transformer_decoder(
 
 def main(_) -> None:
   """Trains a model and save the parameters to a file."""
-  utm = utms_lib.BrainPhoqueUTM(alphabet_size=2)
+  rng = np.random.default_rng(seed=1)
+  program_sampler = utms_lib.FastSampler(rng=rng)
+  utm = utms_lib.BrainPhoqueUTM(program_sampler, alphabet_size=2)
   data_generator = utm_dg_lib.UTMDataGenerator(
-      batch_size=32, # Should really be 128
-      seq_length=256,
-      rng=1,
+      batch_size=8,
+      seq_length=2048,
+      rng=rng,
       utm=utm,
-      memory_size=10,
-      maximum_steps=2560, # TODO: is this why performance falls of? seq length is more than 100, so this should be at least a few times higher
-      tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,#utm_dg_lib.Tokenizer.ASCII,
-      maximum_program_length=100,
+      memory_size=200,
+      maximum_steps=20480,
+      tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
+      maximum_program_length=2000,
   )
 
   params, loss = train_transformer_decoder(
       data_generator=data_generator,
-      training_steps=500000,#100,
-      log_every=1000,#10,
+      training_steps=1000000,
+      log_every=1000,
   )
   logging.info('Final loss: %f', loss)
 
-  np.savez('params.npz', **params)
-  logging.info('Parameters saved in file params.npz')
+  np.savez('params_Q2048.npz', **params)
+  logging.info('Parameters saved in file params_Q2048.npz')
 
 
 if __name__ == '__main__':
