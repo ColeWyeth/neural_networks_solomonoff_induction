@@ -187,22 +187,22 @@ def train_transformer_decoder(
 
 def main(_) -> None:
   """Trains a model and save the parameters to a file."""
-  utm = utms_lib.BrainPhoqueUTM()
+  utm = utms_lib.BrainPhoqueUTM(alphabet_size=2)
   data_generator = utm_dg_lib.UTMDataGenerator(
-      batch_size=32,
+      batch_size=32, # Should really be 128
       seq_length=256,
       rng=1,
       utm=utm,
       memory_size=10,
-      maximum_steps=100,
-      tokenizer=utm_dg_lib.Tokenizer.ASCII,
+      maximum_steps=2560, # TODO: is this why performance falls of? seq length is more than 100, so this should be at least a few times higher
+      tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,#utm_dg_lib.Tokenizer.ASCII,
       maximum_program_length=100,
   )
 
   params, loss = train_transformer_decoder(
       data_generator=data_generator,
-      training_steps=100,
-      log_every=10,
+      training_steps=500000,#100,
+      log_every=1000,#10,
   )
   logging.info('Final loss: %f', loss)
 
