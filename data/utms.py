@@ -182,9 +182,7 @@ class MCSampler(ProgramSampler):
     data = ast.literal_eval(data_str)
     counts = data['counts_dict']
     self._tokens = data['tokens']
-    print(self._tokens)
     self._token_indices = {ch: idx for idx, ch in enumerate(self._tokens)}
-    print(self._token_indices)
     self._ctx_len = max(map(len, counts.keys()))
     # Turn the counts into distributions by normalizing them.
     self._distributions = {}
@@ -213,7 +211,7 @@ class MCSampler(ProgramSampler):
     # Note: prog[-2:] works fine even if prog is empty.
     ctx = program[-self._ctx_len :]
     dist = self._distributions.get(ctx, None)
-    instruction = self._rng.choice(self._tokens, p=dist)
+    instruction = self._rng.choice(list(self._tokens), p=dist)
     return instruction
 
   # WARNING: The probability of the short program may be lower
