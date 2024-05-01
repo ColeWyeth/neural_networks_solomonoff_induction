@@ -257,10 +257,6 @@ class BrainPhoqueUTM(UniversalTuringMachine):
   the boundaries of the interval.
   Moving the reading head on the data tape is done with the '>' and
   '<' instructions. Loops are created using the '[' and ']' instructions.
-  By contrast to the original BrainFuck design, '[' does not jump at all,
-  while ']' jumps back to '[' if the integer under the reading head is *not* 0.
-  This is an important difference and Turing completeness has not been proven
-  for this yet (seems like it should hold though).
   Unlike the paper version, ',' is incuded and writes a uniformly random symbol to
   the work tape.
   Finally, outputs are returned with the instruction '.'.
