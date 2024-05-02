@@ -335,6 +335,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
       alphabet_size: int = 9,
       print_trace: bool = False,
       shorten_program: bool = False,
+      use_input_instruction = True,
   ):
     """Constructor.
 
@@ -351,6 +352,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
     self._alphabet_size = alphabet_size
     self._print_trace = print_trace
     self._shorten_program = shorten_program
+    self._use_input_instruction = use_input_instruction
     sampler.set_tokens(tokens=self.program_tokens)
 
   @property
@@ -361,12 +363,12 @@ class BrainPhoqueUTM(UniversalTuringMachine):
   @property
   def program_tokens(self) -> Sequence[str]:
     """Returns the tokens that can be used to write a BrainPhoque program."""
-    return ['+', '-', '>', '<', '[', ']', '.', ',']
+    return ['+', '-', '>', '<', '[', ']', '.'] + int(self._use_input_instruction) * [',']
 
   @property
   def program_valid_tokens(self) -> Sequence[str]:
     """Returns the tokens that can appear in a BrainPhoque program."""
-    return ['+', '-', '>', '<', '[', '{', ']', '.', ',']
+    return ['+', '-', '>', '<', '[', '{', ']', '.'] + int(self._use_input_instruction) * [',']
 
   def run_program(
       self,
@@ -432,7 +434,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
     if input_symbols is None:
       input_symbols = []
     inputs_read = 0
-    # Dictionary of inputs corresponding to each ','
+    # Dictionary of input indices corresponding to each ','
     reads = {}
 
     def make_result(status: str) -> RunResult:
@@ -460,8 +462,14 @@ class BrainPhoqueUTM(UniversalTuringMachine):
       #   brackets.
       if self._shorten_program:
         short_program = []
+        # The shortened input will be filled with only the minimal necessary input
+        # symbols. None's correspond to reads that never take place because of removed
+        # ',' instructions.  
         short_input_symbols = [None]*len(input_symbols)
-        prev_read_idx = None
+        # Because we make only one pass over the program, we need to track the original
+        # index position of the last ',' instruction so that its input symbols can be 
+        # erased if we determine they are overwritten by another ',' instruction.
+        prev_reads_idx = None
         # No need to include {'[': ']} because infinite loops that are evaluated
         # are removed automatically using `first_sampled_idx_after_print`, while
         # infinite loops that are skipped cannot be generated, since the open
@@ -505,13 +513,13 @@ class BrainPhoqueUTM(UniversalTuringMachine):
               and short_program[-1] == ','
             ):
               # Inputs for the previous ',' are not needed
-              for input_idx in reads[prev_read_idx]:
+              for input_idx in reads[prev_reads_idx]:
                 short_input_symbols[input_idx] = None
               short_program.pop()
             # Inputs read by the current instruction may be needed
             for input_idx in reads[idx]:
               short_input_symbols[input_idx] = input_symbols[input_idx]
-            prev_read_idx = idx
+            prev_reads_idx = idx
           if (
             short_program
             and short_program[-1] == ','
@@ -519,12 +527,14 @@ class BrainPhoqueUTM(UniversalTuringMachine):
           ):
             # Modify the inputs read by ',' when they are immediately changed.
             # This case is mutually exclusive with self-cancellation but both imply that
-            # the new instruction does not need to be appended.
+            # instruction does not need to be appended.
+            # Because instruction is not ',', prev_reads_idx is the original index position
+            # of the previous ','. 
             if instruction == '+':
-              for input_idx in reads[prev_read_idx]:
+              for input_idx in reads[prev_reads_idx]:
                 short_input_symbols[input_idx] = (short_input_symbols[input_idx] + 1) % self._alphabet_size
             elif instruction == '-':
-              for input_idx in reads[prev_read_idx]:
+              for input_idx in reads[prev_reads_idx]:
                 short_input_symbols[input_idx] = (short_input_symbols[input_idx] - 1) % self._alphabet_size
           elif (
               short_program
@@ -541,7 +551,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
         # program_tokens and not program_valid_tokens because when sampling
         # we don't need to sample '{' (only '[').
         short_ln_loss = self._sampler.program_ln_loss(short_program) + len(short_input_symbols)*np.log(self._alphabet_size)
-        long_ln_loss = self._sampler.program_ln_loss(program2) + len(short_input_symbols)*np.log(self._alphabet_size)
+        long_ln_loss = self._sampler.program_ln_loss(program2) + len(input_symbols)*np.log(self._alphabet_size)
       else:
         short_program = None
         short_input_symbols = None
