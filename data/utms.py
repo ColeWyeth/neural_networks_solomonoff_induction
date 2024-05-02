@@ -335,7 +335,7 @@ class BrainPhoqueUTM(UniversalTuringMachine):
       alphabet_size: int = 9,
       print_trace: bool = False,
       shorten_program: bool = False,
-      use_input_instruction = True,
+      use_input_instruction = False,
   ):
     """Constructor.
 
