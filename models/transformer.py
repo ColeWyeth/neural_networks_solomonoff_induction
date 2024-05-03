@@ -27,15 +27,15 @@ import numpy as np
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
   """Hyperparameters used in the Transformer architectures."""
-
+  
   # Vocabulary size.
   vocab_size: int
   # The dimension of the first embedding.
-  embedding_dim: int = 64
+  embedding_dim: int = 256 #64
   # The number of multi-head attention layers.
-  num_layers: int = 4
+  num_layers: int = 6 #4
   # The number of heads per layer.
-  num_heads: int = 8
+  num_heads: int = 4 #8
   # The parameter initialization scale for the embeddings.
   emb_init_scale: float = 0.02
   # How much larger the hidden layer of the feedforward network should be

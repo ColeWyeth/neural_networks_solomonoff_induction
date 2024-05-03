@@ -28,11 +28,16 @@ import optax
 import tqdm
 import tree
 
-from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import data_generator as dg_lib
-from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import utm_data_generator as utm_dg_lib
-from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import utms as utms_lib
-from google3.third_party.deepmind.neural_networks_solomonoff_induction.models import transformer
+# TODO: these dependencies belong in PR
+# from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import data_generator as dg_lib
+# from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import utm_data_generator as utm_dg_lib
+# from google3.third_party.deepmind.neural_networks_solomonoff_induction.data import utms as utms_lib
+# from google3.third_party.deepmind.neural_networks_solomonoff_induction.models import transformer
 
+from neural_networks_solomonoff_induction.data import data_generator as dg_lib
+from neural_networks_solomonoff_induction.data import utm_data_generator as utm_dg_lib
+from neural_networks_solomonoff_induction.data import utms as utms_lib
+from neural_networks_solomonoff_induction.models import transformer
 
 def _make_loss_fn(model: hk.Transformed) -> Any:
   """Returns the loss function for update_parameters."""
@@ -188,27 +193,27 @@ def main(_) -> None:
   """Trains a model and save the parameters to a file."""
   rng = np.random.default_rng(seed=1)
   program_sampler = utms_lib.FastSampler(rng=rng)
-  utm = utms_lib.BrainPhoqueUTM(program_sampler)
+  utm = utms_lib.BrainPhoqueUTM(program_sampler, alphabet_size=2)
   data_generator = utm_dg_lib.UTMDataGenerator(
-      batch_size=32,
-      seq_length=256,
+      batch_size=8,
+      seq_length=2048,
       rng=rng,
       utm=utm,
-      memory_size=10,
-      maximum_steps=100,
-      tokenizer=utm_dg_lib.Tokenizer.ASCII,
-      maximum_program_length=100,
+      memory_size=200,
+      maximum_steps=20480,
+      tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
+      maximum_program_length=2000,
   )
 
   params, loss = train_transformer_decoder(
       data_generator=data_generator,
-      training_steps=100,
-      log_every=10,
+      training_steps=1000000,
+      log_every=1000,
   )
   logging.info('Final loss: %f', loss)
 
-  np.savez('params.npz', **params)
-  logging.info('Parameters saved in file params.npz')
+  np.savez('params_Q2048.npz', **params)
+  logging.info('Parameters saved in file params_Q2048.npz')
 
 
 if __name__ == '__main__':
