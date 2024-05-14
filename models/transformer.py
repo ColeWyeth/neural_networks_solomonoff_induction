@@ -31,9 +31,9 @@ class TransformerConfig:
   # Vocabulary size.
   vocab_size: int
   # The dimension of the first embedding.
-  embedding_dim: int = 256 #64
+  embedding_dim: int = 32 # 256 switch back
   # The number of multi-head attention layers.
-  num_layers: int = 6 #4
+  num_layers: int = 4 # 6 switch back
   # The number of heads per layer.
   num_heads: int = 4 #8
   # The parameter initialization scale for the embeddings.
@@ -62,7 +62,11 @@ class MultiHeadDotProductAttention(hk.Module):
     super().__init__(name=name)
     self._num_heads = num_heads
     self._num_hiddens_per_head = num_hiddens_per_head
-
+    self.num_hiddens = self._num_hiddens_per_head * self._num_heads
+    self.lin_q = hk.Linear(self.num_hiddens, with_bias=False)
+    self.lin_k = hk.Linear(self.num_hiddens, with_bias=False)
+    self.lin_v = hk.Linear(self.num_hiddens, with_bias=False)
+    self.lin_out = hk.Linear(self.num_hiddens, with_bias=False) # This assumes embedding_dim = num_hiddens
   def __call__(
       self,
       inputs_q: jax.Array,
@@ -72,10 +76,9 @@ class MultiHeadDotProductAttention(hk.Module):
     """Returns the output of the multi-head attention."""
     batch_size, sequence_length, embedding_size = inputs_q.shape
 
-    num_hiddens = self._num_hiddens_per_head * self._num_heads
-    q = hk.Linear(num_hiddens, with_bias=False)(inputs_q)
-    k = hk.Linear(num_hiddens, with_bias=False)(inputs_kv)
-    v = hk.Linear(num_hiddens, with_bias=False)(inputs_kv)
+    q = self.lin_q(inputs_q)
+    k = self.lin_k(inputs_kv)
+    v = self.lin_v(inputs_kv)
     # The second (sequence) dimension is undefined since it can differ between
     # queries and keys/values when decoding. Also checking that the inputs have
     # the same batch size as the reshape below does not guarantee a failure if
@@ -95,8 +98,48 @@ class MultiHeadDotProductAttention(hk.Module):
     normalized_attention = jnn.softmax(attention)
 
     output = jnp.einsum('bhtT,bThd->bthd', normalized_attention, v)
-    output = jnp.reshape(output, (batch_size, sequence_length, num_hiddens))
-    return hk.Linear(embedding_size, with_bias=False)(output)
+    output = jnp.reshape(output, (batch_size, sequence_length, self.num_hiddens))
+    return self.lin_out(output)
+  
+  def inference(
+      self,
+      inputs_q: jax.Array,
+      inputs_kv: jax.Array,
+      mem_k: jax.Array,
+      mem_v: jax.Array,
+  ) -> jax.Array:
+    embedding_size, = inputs_q.shape
+
+    q = self.lin_q(inputs_q)
+    new_k = self.lin_k(inputs_kv)
+    new_v = self.lin_v(inputs_kv)
+    k = jnp.concatenate(
+      [mem_k, jnp.expand_dims(new_k,0)],
+      0,
+    )
+    v = jnp.concatenate(
+      [mem_v, jnp.expand_dims(new_v,0)],
+      0,
+    )
+
+    sequence_length = k.shape[0]
+
+    q = jnp.reshape(q, (self._num_heads, self._num_hiddens_per_head))
+    new_shape = (-1, self._num_heads, self._num_hiddens_per_head)
+    k = jnp.reshape(k, new_shape)
+    v = jnp.reshape(v, new_shape)
+
+    # Let b=batch_size, t=seq_len, h=num_heads, and d=num_hiddens_per_head.
+    attention = jnp.einsum('hd,Thd->Th', q, k)
+    attention *= 1.0 / jnp.sqrt(self._num_hiddens_per_head)
+
+    # Causal masking is unnecessary because we only need activations for the latest token
+
+    normalized_attention = jnn.softmax(attention)
+
+    output = jnp.einsum('Th,Thd->hd', normalized_attention, v)
+    output = jnp.reshape(output, (self.num_hiddens,))
+    return self.lin_out(output), new_k, new_v
 
 
 def sinusoid_position_encoding(
@@ -206,3 +249,42 @@ def transformer_decoder(
 
   logits = hk.Linear(config.vocab_size)(h)
   return jnn.log_softmax(logits, axis=-1)
+
+# def markov_kernel(
+#     input_q,
+#     input_kv,
+#     mem_k,
+#     mem_v,
+#     config,
+# ):
+#   return MultiHeadDotProductAttention(
+#     num_heads=config.num_heads,
+#     num_hiddens_per_head=config.embedding_dim // config.num_heads,
+#   ).inference(input_q, input_kv, mem_k, mem_v)
+
+def markov_kernel(
+    input,
+    mem_k,
+    mem_v,
+    config,
+):
+  # might need to expand dims
+  embedding = embed_sequences(input, config)
+
+  h = embedding
+
+  for i in range(config.num_layers):
+    self_attention, new_k_i, new_v_i = MultiHeadDotProductAttention(
+      num_heads=config.num_heads,
+      num_hiddens_per_head=config.embedding_dim // config.num_heads,
+    ).inference(h, h, mem_k[i], mem_v[i])
+
+    # Position-wise feedforward network.
+    h = hk.Linear(config.embedding_dim * config.widening_factor)(attention)
+    h = jnn.gelu(h)
+    h = hk.Linear(config.embedding_dim)(h)
+    h = layer_norm(h + attention)
+
+  logits = hk.Linear(config.vocab_size)(h)
+  return jnn.log_softmax(logits, axis=-1)
+

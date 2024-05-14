@@ -195,8 +195,8 @@ def main(_) -> None:
   program_sampler = utms_lib.FastSampler(rng=rng)
   utm = utms_lib.BrainPhoqueUTM(program_sampler, alphabet_size=2)
   data_generator = utm_dg_lib.UTMDataGenerator(
-      batch_size=8,
-      seq_length=2048,
+      batch_size=1,
+      seq_length=256,
       rng=rng,
       utm=utm,
       memory_size=200,
@@ -207,13 +207,13 @@ def main(_) -> None:
 
   params, loss = train_transformer_decoder(
       data_generator=data_generator,
-      training_steps=1000000,
+      training_steps=100,#1000000,
       log_every=1000,
   )
   logging.info('Final loss: %f', loss)
 
-  np.savez('params_Q2048.npz', **params)
-  logging.info('Parameters saved in file params_Q2048.npz')
+  np.savez('params_test.npz', **params)
+  logging.info('Parameters saved in file params_test.npz')
 
 
 if __name__ == '__main__':
