@@ -31,9 +31,9 @@ class TransformerConfig:
   # Vocabulary size.
   vocab_size: int
   # The dimension of the first embedding.
-  embedding_dim: int = 32 # 256 switch back
+  embedding_dim: int = 256 # 32 switch back for test
   # The number of multi-head attention layers.
-  num_layers: int = 4 # 6 switch back
+  num_layers: int = 6 # 4 switch back for test
   # The number of heads per layer.
   num_heads: int = 4 #8
   # The parameter initialization scale for the embeddings.
@@ -79,6 +79,9 @@ class MultiHeadDotProductAttention(hk.Module):
     q = self.lin_q(inputs_q)
     k = self.lin_k(inputs_kv)
     v = self.lin_v(inputs_kv)
+    # print(f"q first: {q[0,:,0]}")
+    # print(f"k first: {k[0,:,0]}")
+    # print(f"v first: {v[0,:,0]}")
     # The second (sequence) dimension is undefined since it can differ between
     # queries and keys/values when decoding. Also checking that the inputs have
     # the same batch size as the reshape below does not guarantee a failure if
@@ -91,14 +94,17 @@ class MultiHeadDotProductAttention(hk.Module):
     # Let b=batch_size, t=seq_len, h=num_heads, and d=num_hiddens_per_head.
     attention = jnp.einsum('bthd,bThd->bhtT', q, k)
     attention *= 1.0 / jnp.sqrt(self._num_hiddens_per_head)
+    # print(f"attention: {attention}")
 
     if mask is not None:
       attention = jnp.where(mask, attention, jnp.finfo(jnp.float32).min)
 
     normalized_attention = jnn.softmax(attention)
+    # print(f"normalized attention: {normalized_attention}")
 
     output = jnp.einsum('bhtT,bThd->bthd', normalized_attention, v)
     output = jnp.reshape(output, (batch_size, sequence_length, self.num_hiddens))
+    #print(f"output: {output}")
     return self.lin_out(output)
   
   def inference(
@@ -120,6 +126,9 @@ class MultiHeadDotProductAttention(hk.Module):
       [mem_v, jnp.expand_dims(new_v,0)],
       0,
     )
+    # print(f"q first: {q[0]}")
+    # print(f"k first: {k[:,0]}")
+    # print(f"v first: {v[:,0]}")
 
     q = jnp.reshape(q, (self._num_heads, self._num_hiddens_per_head))
     new_shape = (-1, self._num_heads, self._num_hiddens_per_head)
@@ -127,15 +136,18 @@ class MultiHeadDotProductAttention(hk.Module):
     v = jnp.reshape(v, new_shape)
 
     # Let b=batch_size, t=seq_len, h=num_heads, and d=num_hiddens_per_head.
-    attention = jnp.einsum('hd,Thd->Th', q, k)
+    attention = jnp.einsum('hd,Thd->hT', q, k)
     attention *= 1.0 / jnp.sqrt(self._num_hiddens_per_head)
+    # print(f"attention: {attention}")
 
     # Causal masking is unnecessary because we only need activations for the latest token
 
     normalized_attention = jnn.softmax(attention)
+    # print(f"normalized attention: {normalized_attention}")
 
-    output = jnp.einsum('Th,Thd->hd', normalized_attention, v)
+    output = jnp.einsum('hT,Thd->hd', normalized_attention, v)
     output = jnp.reshape(output, (self.num_hiddens,))
+    #print(f"output: {output}")
     return self.lin_out(output), new_k, new_v
 
 
@@ -222,6 +234,7 @@ def transformer_decoder(
 
   # Embeds the inputs and adds positional encodings.
   embeddings = embed_sequences(inputs, config)
+  # print(f"embeddings: {embeddings}")
 
   batch_size, sequence_length = embeddings.shape[:2]
 
@@ -236,6 +249,8 @@ def transformer_decoder(
         num_heads=config.num_heads,
         num_hiddens_per_head=config.embedding_dim // config.num_heads,
     )(inputs_q=h, inputs_kv=h, mask=causal_mask)
+    # if i == 0:
+    #   print(f"self attention: {self_attention}")
     attention = layer_norm(h + self_attention)
 
     # Position-wise feedforward network.
@@ -269,6 +284,8 @@ def markov_kernel(
   # Input is not right shifted so should always start with initial zero
   embedding = embed_sequences([input], config)
 
+  # print(f"embedding: {embedding}")
+
   h = embedding[0, -1, :] # we're only interested in latest token embedding 
   new_k, new_v = [], []
   for i in range(config.num_layers):
@@ -276,6 +293,8 @@ def markov_kernel(
       num_heads=config.num_heads,
       num_hiddens_per_head=config.embedding_dim // config.num_heads,
     ).inference(h, h, mem_k[i], mem_v[i])
+    # if i == 0:
+    #   print(f"self_attention: {self_attention}")
     attention = layer_norm(h + self_attention)
     new_k.append(new_k_i)
     new_v.append(new_v_i)
