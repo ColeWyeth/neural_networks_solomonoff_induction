@@ -337,3 +337,5 @@ class Memoized_Transformer:
     self.mem_k = self.mem_k[:, :-n, :]
     self.mem_v = self.mem_v[:, :-n, :]
     self.outputs = self.outputs[:-n]
+  def predict(self):
+    return self.outputs[-1]
