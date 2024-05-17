@@ -22,7 +22,7 @@ import jax
 import jax.nn as jnn
 import jax.numpy as jnp
 import numpy as np
-
+import functools
 
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
@@ -108,7 +108,6 @@ class MultiHeadDotProductAttention(hk.Module):
       mem_k: jax.Array,
       mem_v: jax.Array,
   ) -> jax.Array:
-    embedding_size, = inputs_q.shape
 
     q = self.lin_q(inputs_q)
     new_k = self.lin_k(inputs_kv)
@@ -121,8 +120,6 @@ class MultiHeadDotProductAttention(hk.Module):
       [mem_v, jnp.expand_dims(new_v,0)],
       0,
     )
-
-    sequence_length = k.shape[0]
 
     q = jnp.reshape(q, (self._num_heads, self._num_hiddens_per_head))
     new_shape = (-1, self._num_heads, self._num_hiddens_per_head)
@@ -268,16 +265,20 @@ def markov_kernel(
     mem_v,
     config,
 ):
-  # might need to expand dims
-  embedding = embed_sequences(input, config)
+  """For now input is the full input sequence which is all embedded."""
+  # Input is not right shifted so should always start with initial zero
+  embedding = embed_sequences([input], config)
 
-  h = embedding
-
+  h = embedding[0, -1, :] # we're only interested in latest token embedding 
+  new_k, new_v = [], []
   for i in range(config.num_layers):
     self_attention, new_k_i, new_v_i = MultiHeadDotProductAttention(
       num_heads=config.num_heads,
       num_hiddens_per_head=config.embedding_dim // config.num_heads,
     ).inference(h, h, mem_k[i], mem_v[i])
+    attention = layer_norm(h + self_attention)
+    new_k.append(new_k_i)
+    new_v.append(new_v_i)
 
     # Position-wise feedforward network.
     h = hk.Linear(config.embedding_dim * config.widening_factor)(attention)
@@ -286,5 +287,34 @@ def markov_kernel(
     h = layer_norm(h + attention)
 
   logits = hk.Linear(config.vocab_size)(h)
-  return jnn.log_softmax(logits, axis=-1)
+  return jnn.log_softmax(logits, axis=-1), jnp.array(new_k), jnp.array(new_v)
 
+class Memoized_Transformer:
+  def __init__(self, params, config):
+    self.params = params
+    self.kernel = hk.transform(
+      functools.partial(markov_kernel, config=config),
+    )
+    # This assumes embedding dim is num hiddens.
+    self.mem_k = jnp.zeros((config.num_layers, 0, config.embedding_dim))
+    self.mem_v = jnp.zeros((config.num_layers, 0, config.embedding_dim))
+    self.outputs = []
+    self.seq = []
+    self.update(0) # all sequences start with a 0 during training
+  def update(self, symbol):
+    self.seq.append(symbol)
+    output, new_k, new_v = self.kernel.apply(
+      params = self.params,
+      input = self.seq,
+      mem_k = self.mem_k,
+      mem_v = self.mem_v,
+      rng = None,
+    )
+    self.outputs.append(output)
+    self.mem_k = jnp.concatenate([self.mem_k, jnp.expand_dims(new_k, 1)], 1)
+    self.mem_v = jnp.concatenate([self.mem_v, jnp.expand_dims(new_v, 1)], 1)
+  def erase(self, n):
+    self.seq = self.seq[:-n]
+    self.mem_k = self.mem_k[:, :-n, :]
+    self.mem_v = self.mem_v[:, :-n, :]
+    self.outputs = self.outputs[:-n]
