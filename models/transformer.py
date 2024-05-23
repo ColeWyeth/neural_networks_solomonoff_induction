@@ -289,10 +289,11 @@ def markov_kernel(
   h = embedding[0, -1, :] # we're only interested in latest token embedding 
   new_k, new_v = [], []
   for i in range(config.num_layers):
+    gpu = jax.devices('gpu')[0]
     self_attention, new_k_i, new_v_i = MultiHeadDotProductAttention(
       num_heads=config.num_heads,
       num_hiddens_per_head=config.embedding_dim // config.num_heads,
-    ).inference(h, h, mem_k[i], mem_v[i])
+    ).inference(h, h, jax.device_put(mem_k[i], device=gpu), jax.device_put(mem_v[i], device=gpu)) # TODO: put these on the device as needed here.
     # if i == 0:
     #   print(f"self_attention: {self_attention}")
     attention = layer_norm(h + self_attention)
@@ -330,8 +331,10 @@ class Memoized_Transformer:
       rng = None,
     )
     self.outputs.append(output)
-    self.mem_k = jnp.concatenate([self.mem_k, jnp.expand_dims(new_k, 1)], 1)
-    self.mem_v = jnp.concatenate([self.mem_v, jnp.expand_dims(new_v, 1)], 1)
+    # TODO: first remove new_k and new_v from the device.
+    cpu = jax.devices('cpu')[0]
+    self.mem_k = jnp.concatenate([self.mem_k, jnp.expand_dims(jax.device_put(new_k, cpu), 1)], 1)
+    self.mem_v = jnp.concatenate([self.mem_v, jnp.expand_dims(jax.device_put(new_v, cpu), 1)], 1)
   def erase(self, n):
     self.seq = self.seq[:-n]
     self.mem_k = self.mem_k[:, :-n, :]
