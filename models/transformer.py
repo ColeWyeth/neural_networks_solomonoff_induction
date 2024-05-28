@@ -152,7 +152,7 @@ class MultiHeadDotProductAttention(hk.Module):
 
 
 def sinusoid_position_encoding(
-    sequence_length: int,
+    pos_seq: int | np.ndarray,
     hidden_size: int,
     max_timescale: float = 1e4,
 ) -> np.ndarray:
@@ -175,7 +175,8 @@ def sinusoid_position_encoding(
   freqs = np.arange(0, hidden_size + 1, 2)
   inv_freq = max_timescale ** (-freqs / hidden_size)
 
-  pos_seq = np.arange(start=0, stop=sequence_length)
+  if type(pos_seq) == int:
+    pos_seq = np.arange(start=0, stop=pos_seq)
 
   sinusoid_inp = np.einsum('i,j->ij', pos_seq, inv_freq)
   embeddings = np.concatenate(
