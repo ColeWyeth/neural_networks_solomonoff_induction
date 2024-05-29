@@ -150,7 +150,19 @@ class MultiHeadDotProductAttention(hk.Module):
     #print(f"output: {output}")
     return self.lin_out(output), new_k, new_v
 
-
+# class Embedding(hk.Module):
+#   def __init__(
+#       self,
+#       config: TransformerConfig,
+#   ):
+#     self.config = config
+#     self.embs_init = hk.initializers.TruncatedNormal(stddev=config.emb_init_scale)
+#     self.embeddings_layer = hk.Embed(
+#         vocab_size=config.vocab_size,
+#         embed_dim=config.embedding_dim,
+#         lookup_style=hk.EmbedLookupStyle.ARRAY_INDEX,
+#         w_init=self.embs_init,
+#     )
 def sinusoid_position_encoding(
     pos_seq: int | np.ndarray,
     hidden_size: int,
@@ -184,10 +196,10 @@ def sinusoid_position_encoding(
   )
   return embeddings[:, :hidden_size]
 
-
 def embed_sequences(
     sequences: jax.Array,
     config: TransformerConfig,
+    pos_seq: np.ndarray | None = None,
 ) -> jax.Array:
   """Returns embeddings for sequences of tokens."""
   embs_init = hk.initializers.TruncatedNormal(stddev=config.emb_init_scale)
@@ -197,12 +209,17 @@ def embed_sequences(
       lookup_style=hk.EmbedLookupStyle.ARRAY_INDEX,
       w_init=embs_init,
   )
+  
   embeddings = embeddings_layer(sequences)
   embeddings *= jnp.sqrt(config.embedding_dim)
 
   _, sequence_length, embedding_size = embeddings.shape
+  # If the indices weren't passed, assume this is the full sequence.
+  # The positional encoding will reconstruct indices.
+  if pos_seq is None:
+    pos_seq = sequence_length
   pos_encodings = sinusoid_position_encoding(
-      sequence_length=sequence_length,
+      pos_seq=pos_seq,
       hidden_size=embedding_size,
   )
   return embeddings + pos_encodings
@@ -276,18 +293,17 @@ def transformer_decoder(
 #   ).inference(input_q, input_kv, mem_k, mem_v)
 
 def markov_kernel(
-    input,
+    h, # new token embedding
     mem_k,
     mem_v,
     config,
 ):
-  """For now input is the full input sequence which is all embedded."""
-  # Input is not right shifted so should always start with initial zero
-  embedding = embed_sequences([input], config)
+  """Input is not right shifted so should always pass in embedding of 0 first"""
+  # embedding = embed_sequences([input], config)
 
   # print(f"embedding: {embedding}")
 
-  h = embedding[0, -1, :] # we're only interested in latest token embedding 
+  #h = embedding[0, -1, :] # we're only interested in latest token embedding 
   new_k, new_v = [], []
   for i in range(config.num_layers):
     gpu = jax.devices('gpu')[0]
@@ -313,8 +329,12 @@ def markov_kernel(
 class Memoized_Transformer:
   def __init__(self, params, config):
     self.params = params
+    self.config = config
     self.kernel = hk.transform(
       functools.partial(markov_kernel, config=config),
+    )
+    self.embed = hk.transform(
+      functools.partial(embed_sequences, config=config)
     )
     # This assumes embedding dim is num hiddens.
     self.mem_k = jnp.zeros((config.num_layers, 0, config.embedding_dim))
@@ -324,9 +344,16 @@ class Memoized_Transformer:
     self.update(0) # all sequences start with a 0 during training
   def update(self, symbol):
     self.seq.append(symbol)
+    embedding = self.embed.apply(
+      params = self.params,
+      sequences = jnp.array([[symbol]]),
+      pos_seq = np.array([len(self.seq)]),
+      rng = None,
+    )
+    h = embedding[0, 0, :]
     output, new_k, new_v = self.kernel.apply(
       params = self.params,
-      input = self.seq,
+      h = h,
       mem_k = self.mem_k,
       mem_v = self.mem_v,
       rng = None,
