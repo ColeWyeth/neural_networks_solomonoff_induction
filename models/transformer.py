@@ -327,7 +327,7 @@ def markov_kernel(
   return jnn.log_softmax(logits, axis=-1), jnp.array(new_k), jnp.array(new_v)
 
 class Memoized_Transformer:
-  def __init__(self, params, config, memory=None):
+  def __init__(self, params, config):
     self.params = params
     self.config = config
     self.kernel = hk.transform(
@@ -342,24 +342,20 @@ class Memoized_Transformer:
     self.outputs = []
     self.seq = []
     self.update(0) # all sequences start with a 0 during training
-    if memory is None:
-      self.memory = 0 # corresponds to infinite memory
-    else:
-      self.memory = memory
   def update(self, symbol):
     self.seq.append(symbol)
     embedding = self.embed.apply(
       params = self.params,
       sequences = jnp.array([[symbol]]),
-      pos_seq = np.array([len(self.seq[-self.memory:])]),
+      pos_seq = np.array([len(self.seq)]),
       rng = None,
     )
     h = embedding[0, 0, :]
     output, new_k, new_v = self.kernel.apply(
       params = self.params,
       h = h,
-      mem_k = self.mem_k[:, -self.memory:, :],
-      mem_v = self.mem_v[:, -self.memory:, :],
+      mem_k = self.mem_k,
+      mem_v = self.mem_v,
       rng = None,
     )
     self.outputs.append(output)
