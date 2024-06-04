@@ -341,11 +341,11 @@ class Memoized_Transformer:
     self.mem_v = jnp.zeros((config.num_layers, 0, config.embedding_dim))
     self.outputs = []
     self.seq = []
-    self.update(0) # all sequences start with a 0 during training
     if memory is None:
       self.memory = 0 # corresponds to infinite memory
     else:
       self.memory = memory
+    self.update(0) # all sequences start with a 0 during training
   def update(self, symbol):
     self.seq.append(symbol)
     embedding = self.embed.apply(
