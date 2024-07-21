@@ -6,13 +6,16 @@ import numpy as np
 from typing import Tuple
 
 from neural_networks_solomonoff_induction.data import utm_data_generator as utm_dg_lib
+from neural_networks_solomonoff_induction.data import chronological_utm_data_generator as chronological_utm_dg_lib
 from neural_networks_solomonoff_induction.data import utms as utms_lib
 
 # Arbitrary constants from https://github.com/google-deepmind/neural_networks_solomonoff_induction/issues/5
 # Increased repetition threshold since I am focused on binary alphabet
-#REP_PERCENT_THRESH = 0.70
-REP_PERCENT_THRESH = 0.95
+#REP_PERCENT_THRESH = 0.70 # paper version
+#REP_PERCENT_THRESH = 0.95
+REP_PERCENT_THRESH = 0.80
 MAX_SHORT_PROGRAM_LEN = 100
+INTERACTION_THRESH = 0.40
 
 def repeating_count(output, delay):
   count = 0 # number of equal elements
@@ -35,65 +38,117 @@ def interesting(program_output: Tuple[str, str]):
     else:
        return True
 
+def get_interacting_programs(log_dict):
+   prog_results = []
+   for res in log_dict['results']:
+      output_len = len(res['ae'][0]) # this is the min of the outputs
+      if res['actions_read'] > INTERACTION_THRESH*output_len and res['percepts_read'] > INTERACTION_THRESH*output_len:
+         prog_results.append(res['agent_result'])
+         prog_results.append(res['env_result'])
+   return prog_results
+
 if __name__ == "__main__":
-    record_name = os.path.join('data', 'ctx_filtered.pyd')
-    k = 2
-    tokens = '<>+-[]{.,'
-    token_list = list(tokens)
+   ctx_name = 'ctx_filtered_chron.pyd'
+   mode = "CHRONOLOGICAL" # "SEQUENTIAL"
+   examples = 20000 # divisible by batch size
+   seq_length = 3000
+   memory_size = 200
+   maximum_steps = 10*seq_length
+   maximum_program_length = 3000
+   alphabet_size = 16
 
-    rng = np.random.default_rng(seed=1)
-    program_sampler = utms_lib.FastSampler(rng=rng)
-    utm = utms_lib.BrainPhoqueUTM(
-        program_sampler,
-        alphabet_size=2,
-        shorten_program=True,
-        use_input_instruction=True,
-    )
-    data_generator = utm_dg_lib.UTMDataGenerator(
-        batch_size=10000,#1000,
-        seq_length=8192,
-        rng=rng,
-        utm=utm,
-        memory_size=200,
-        maximum_steps=20480,
-        tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
-        maximum_program_length=3000,
-    )
-    seqs, log_dict = data_generator.sample()
-    print(log_dict.keys())
-    program_output_list = [(res['short_program'], res['output']) for res in log_dict['results']]
-    # print(f"All programs and output: {len(program_output_list)}")
-    # for po in program_output_list:
-    #    print(f"{po[0]}: {repr(po[1])}")
-    interesting_program_output_list = list(filter(interesting, program_output_list))
-    interesting_programs = [po[0] for po in interesting_program_output_list]
-    # print(f"Interesting programs and output: {len(interesting_programs)}")
-    # for po in interesting_program_output_list:
-    #    print(f"{po[0]}: {repr(po[1])}")
+   batch_size = 100
+   record_name = os.path.join('data', ctx_name)
+   k = 2
+   if mode == "SEQUENTIAL":
+      tokens = '<>+-[]{.,'
+   else:
+      tokens = '<>+-[]{.,?'
+   token_list = list(tokens)
 
-    sym_to_ind = dict()
-    for i, sym in enumerate(token_list):
-       sym_to_ind[sym] = i
+   rng = np.random.default_rng(seed=1)
+   program_sampler = utms_lib.FastSampler(rng=rng)
 
-    def get_empty_counts():
-       return len(token_list)*[0]
-    counts = defaultdict(get_empty_counts)
+   def get_utm(is_chronological):
+      return utms_lib.BrainPhoqueUTM(
+         program_sampler,
+         alphabet_size=alphabet_size,
+         shorten_program=True,
+         use_input_instruction=True,
+         use_chronological_instruction=is_chronological,
+      )
 
-    for p in interesting_programs:
-        for i in range(k, len(p)):
-            context = p[i-k:i]
-            counts[context][sym_to_ind[p[i]]] += 1
-    print(token_list)
-    record = {
-       'tokens': tokens,
-       'counts_dict': dict(counts),
-    }
-    print(f"Saving record to {record_name}:")
-    print(record)
+   if mode == "SEQUENTIAL":
+      utm = get_utm(False)
+      data_generator = utm_dg_lib.UTMDataGenerator(
+         batch_size=batch_size,#1000,
+         seq_length=seq_length,
+         rng=rng,
+         utm=utm,
+         memory_size=memory_size,
+         maximum_steps=maximum_steps,
+         tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
+         maximum_program_length=maximum_program_length,
+      )
+   else:
+      utm_pair = utms_lib.ChronologicalUTMPair(
+         agent_utm=get_utm(True),
+         env_utm=get_utm(True),
+      )
+      data_generator = chronological_utm_dg_lib.ChronologicalUTMDataGenerator(
+         batch_size=batch_size,
+         seq_length=seq_length,
+         rng=rng,
+         utm_pair=utm_pair,
+         memory_size=memory_size,
+         maximum_steps=maximum_steps,
+         tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
+         maximum_program_length=maximum_program_length,
+      )
+
+   all_good_programs = []
+
+   for i in range(examples//batch_size):
+      seqs, log_dict = data_generator.sample()
+      if mode == "SEQUENTIAL":
+         results = log_dict['results']
+      else:
+         results = get_interacting_programs(log_dict)
+      program_output_list = [(res['short_program'], res['output']) for res in results]
+      # print(f"All programs and output: {len(program_output_list)}")
+      # for po in program_output_list:
+      #    print(f"{po[0]}: {repr(po[1])}")
+      interesting_program_output_list = list(filter(interesting, program_output_list))
+      interesting_programs = [po[0] for po in interesting_program_output_list]
+      print(f"Batch {i} Interesting programs and output: {len(interesting_programs)}")
+      for po in interesting_program_output_list:
+         print(f"{po[0]}: {repr(po[1])}")
+      all_good_programs.extend(interesting_programs)
+
+   print(f"TOTAL Interesting programs and output: {len(all_good_programs)}")
+   sym_to_ind = dict()
+   for i, sym in enumerate(token_list):
+      sym_to_ind[sym] = i
+
+   def get_empty_counts():
+      return len(token_list)*[0]
+   counts = defaultdict(get_empty_counts)
+
+   for p in all_good_programs:
+      for i in range(k, len(p)):
+         context = p[i-k:i]
+         counts[context][sym_to_ind[p[i]]] += 1
+   print(token_list)
+   record = {
+      'tokens': tokens,
+      'counts_dict': dict(counts),
+   }
+   print(f"Saving record to {record_name}:")
+   print(record)
 
 
-    with open(record_name, 'w+') as f:
-       f.write(pprint.pformat(record))
+   with open(record_name, 'w+') as f:
+      f.write(pprint.pformat(record))
 
 # The below is unnecessary, just count the occurences of each event.
 # Passing this to the MC sampler it fits a Markov model (alpha = 0.5 corresponds to KT).
@@ -103,7 +158,7 @@ if __name__ == "__main__":
 #        sym_to_ind[sym] = i
 #     # last index is for the next symbol
 #     cond_probs = (1/len(symbols)) * np.ones((k+1)*[len(symbols)])
-    
+
 #     # Since the programs never change, we can once and for all
 #     # count the number of occurences of each symbol in each context.
 #     counts = np.zeros((k+1)*len(symbols))
@@ -128,11 +183,11 @@ if __name__ == "__main__":
 #                 rho = j
 #         lmbda = (1/rho)(1 - sum(u[:rho+1]))
 #         return [max(yi+lmbda,0) for yi in y]
-           
+
 #     while True:
-#         # d/dx -ln x = -1/x 
+#         # d/dx -ln x = -1/x
 #         grad = np.multiply(-counts, 1/cond_probs)
-#         if 
+#         if
 
 #         # project the gradient to plane of simplex
 #         proj_grad = grad - np.sum(grad, -1, keepdims=True)
@@ -155,9 +210,9 @@ if __name__ == "__main__":
 #         for s in symbols:
 #             strings.extend([s + string for string in suffixes])
 #         return strings
-    
+
 #     contexts = get_strings(symbols, k-1)
 
 #     for context in contexts:
 
-#     return 
+#     return
