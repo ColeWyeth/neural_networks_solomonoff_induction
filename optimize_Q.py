@@ -48,9 +48,9 @@ def get_interacting_programs(log_dict):
    return prog_results
 
 if __name__ == "__main__":
-   ctx_name = 'ctx_filtered_chron.pyd'
+   ctx_name = 'ctx_filtered_chronological2.pyd'
    mode = "CHRONOLOGICAL" # "SEQUENTIAL"
-   examples = 20000 # divisible by batch size
+   examples = 100000 # divisible by batch size
    seq_length = 3000
    memory_size = 200
    maximum_steps = 10*seq_length

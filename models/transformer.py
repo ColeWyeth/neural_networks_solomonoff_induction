@@ -27,13 +27,13 @@ import functools
 @dataclasses.dataclass(kw_only=True)
 class TransformerConfig:
   """Hyperparameters used in the Transformer architectures."""
-  
+
   # Vocabulary size.
   vocab_size: int
   # The dimension of the first embedding.
-  embedding_dim: int = 256 # 32 switch back for test
+  embedding_dim: int = 256 # 32
   # The number of multi-head attention layers.
-  num_layers: int = 6 # 4 switch back for test
+  num_layers: int = 6 # 6 my largest model has two extra layers 6+2=8
   # The number of heads per layer.
   num_heads: int = 4 #8
   # The parameter initialization scale for the embeddings.
@@ -106,7 +106,7 @@ class MultiHeadDotProductAttention(hk.Module):
     output = jnp.reshape(output, (batch_size, sequence_length, self.num_hiddens))
     #print(f"output: {output}")
     return self.lin_out(output)
-  
+
   def inference(
       self,
       inputs_q: jax.Array,
@@ -209,7 +209,7 @@ def embed_sequences(
       lookup_style=hk.EmbedLookupStyle.ARRAY_INDEX,
       w_init=embs_init,
   )
-  
+
   embeddings = embeddings_layer(sequences)
   embeddings *= jnp.sqrt(config.embedding_dim)
 
@@ -303,7 +303,7 @@ def markov_kernel(
 
   # print(f"embedding: {embedding}")
 
-  #h = embedding[0, -1, :] # we're only interested in latest token embedding 
+  #h = embedding[0, -1, :] # we're only interested in latest token embedding
   new_k, new_v = [], []
   for i in range(config.num_layers):
     gpu = jax.devices('gpu')[0]

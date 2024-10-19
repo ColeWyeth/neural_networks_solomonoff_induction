@@ -23,7 +23,7 @@ prior.
 
 import abc
 import ast
-from typing import Any, Mapping, Sequence, Union
+from typing import Any, Mapping, Sequence, Union, Callable, Optional
 
 import numpy as np
 
@@ -336,6 +336,8 @@ class BrainPhoqueUTM(UniversalTuringMachine):
       print_trace: bool = False,
       shorten_program: bool = False,
       use_input_instruction = False,
+      use_chronological_instruction = False,
+      #chronological_source: Optional[Callable[[], Optional[int]]] = None, 
   ):
     """Constructor.
 
@@ -353,22 +355,392 @@ class BrainPhoqueUTM(UniversalTuringMachine):
     self._print_trace = print_trace
     self._shorten_program = shorten_program
     self._use_input_instruction = use_input_instruction
+    self._use_chronological_instruction = use_chronological_instruction
     sampler.set_tokens(tokens=self.program_tokens)
 
   @property
   def alphabet_size(self) -> int:
     """Returns the size of the data and output alphabets."""
     return self._alphabet_size
+  
+  @property
+  def extra_instructions(self) -> Sequence[str]:
+    """Returns the optional instructions selected."""
+    return int(self._use_input_instruction) * [','] + int(self._use_chronological_instruction) * ['?']
 
   @property
   def program_tokens(self) -> Sequence[str]:
     """Returns the tokens that can be used to write a BrainPhoque program."""
-    return ['+', '-', '>', '<', '[', ']', '.'] + int(self._use_input_instruction) * [',']
+    return ['+', '-', '>', '<', '[', ']', '.'] + self.extra_instructions
 
   @property
   def program_valid_tokens(self) -> Sequence[str]:
     """Returns the tokens that can appear in a BrainPhoque program."""
-    return ['+', '-', '>', '<', '[', '{', ']', '.'] + int(self._use_input_instruction) * [',']
+    return ['+', '-', '>', '<', '[', '{', ']', '.'] + self.extra_instructions
+  
+  class ExecutionContext():
+    def __init__(self, program, memory_size, maximum_steps, max_output_length, input_symbols):
+      # The index of the pointer moving on the program string.
+      self.program_index = 0
+      # The memory tape, initialised with all zeros. Can only contain integers
+      # between 0 and alphabet size - 1.
+      self.memory = [0] * memory_size
+      self.memory_size = memory_size
+      # The index of the pointer moving on the memory tape.
+      self.memory_index = 0
+      # The output is a list, eventually converted to a string.
+      self.output = []
+      # We count the number of steps to stop if it's too high.
+      self.num_steps = 0
+      # Dictionary of places to jump to on brackets.
+      self.jumps = {}
+      self.unmatched_brackets = []
+      self.program = program
+      # Program to construct either from `program`, or by sampling instructions.
+      self.program2 = ''
+      # Keep track of the instructions that are sampled after the last print `.`
+      # evaluation.
+      self.first_sampled_idx_after_print = len(program)
+      self.maximum_steps = maximum_steps
+      self.max_output_length = max_output_length
+
+      if input_symbols is None:
+        self.input_symbols = []
+      else:
+        self.input_symbols = input_symbols
+      self.inputs_read = 0
+      # Dictionary of input indices corresponding to each ','
+      self.reads = {}
+      self.chronological_index = 0
+      self.chronological_inputs = []
+    def set_chronological_inputs(self, symbol_list : Sequence[int]):
+      """It is only necessary to call this once and then mutate the list."""
+      self.chronological_inputs = symbol_list
+    def get_next_chronological(self) -> Optional[int]:
+      # print(self.chronological_index)
+      # print(self.chronological_inputs)
+      if self.chronological_index < len(self.chronological_inputs):
+        sym = self.chronological_inputs[self.chronological_index]
+        self.chronological_index += 1
+        return sym
+      else:
+        return None
+  
+  def make_result(self, ex : ExecutionContext, status: str) -> RunResult:
+    # This function is nested because it requires access to many of the
+    # local variables of the enclosing function, and passing so many arguments
+    # wouldn't be more readable or more efficient.
+    # Using class fields for all these temporary variables would be rather
+    # clunky too.
+    """Returns the dictionary to be returned by `run_program`.
+
+    See the docstring for `run_program`.
+
+    Args:
+      status: The reason why the program has finished.
+    """
+    if status == "RUNNING":
+      return {'status': status}
+    # Reduce the program to an equivalent program (apart from smaller size
+    # computation steps), by removing unnecessary brackets, self-cancelling
+    # pairs of instructions (e.g., '+-'), and instructions that are evaluated
+    # for the first time after the last print `.` operations. See below for
+    # details.
+    # This takes linear time with the length of the original program.
+    # The resulting program is never slower than the original one.
+    #   For example, one could reduce '+[..]' to '+[.]' which is semantically
+    #   equivalent, but twice as slow due to the time required by the
+    #   brackets.
+    if self._shorten_program:
+      short_program = []
+      # The shortened input will be filled with only the minimal necessary input
+      # symbols. None's correspond to reads that never take place because of removed
+      # ',' instructions.  
+      short_input_symbols = [None]*len(ex.input_symbols)
+      # Because we make only one pass over the program, we need to track the original
+      # index position of the last ',' instruction so that its input symbols can be 
+      # erased if we determine they are overwritten by another ',' instruction.
+      prev_reads_idx = None
+      # No need to include {'[': ']} because infinite loops that are evaluated
+      # are removed automatically using `first_sampled_idx_after_print`, while
+      # infinite loops that are skipped cannot be generated, since the open
+      # bracket would be '{' and the body would not be generated, and the
+      # hanging '{' would later be removed by the code below.
+      cancelling_ids = {'+': '-', '-': '+', '<': '>', '>': '<'}
+      for idx, instruction in enumerate(ex.program2):
+        if idx == ex.first_sampled_idx_after_print:
+          # Remove all instructions that are sampled after the last evaluation
+          # of a print `.` instruction. The program remains consistent with
+          # the output. This gives a better lower-bound on the prediction
+          # probability of Solomonoff Induction.
+          # In particular, this removes all infinite loops that use the print
+          # operation.
+          # Due to the property that newly sampled instructions are always
+          # appended (at the end) to the program, it's just a matter of
+          # keeping track the index of the first sampled operation after a `.`
+          # is evaluated.
+          break
+        if instruction == '[' and idx in ex.unmatched_brackets:
+          # Remove '[' that are in unmatched_brackets, but not those that are
+          # not in jumps! (it just means they don't have a continuation).
+          continue
+        if instruction == '{' and idx not in ex.jumps:
+          # Remove '{' that are not in jumps (they have no body), but not
+          # those that are in unmatched (it just means the body hasn't been
+          # finished when the program stopped, but they are still in jumps).
+          continue
+        if instruction == ']' and ex.jumps[idx] == idx:
+          # Remove ']' that jump to themselves (= skip).
+          continue
+        if instruction == ',':
+          # Remove instructions with results erased by ','.
+          while (
+            short_program
+            and short_program[-1] in ['-','+']
+          ):
+            short_program.pop()
+          if (
+            short_program
+            and short_program[-1] == ','
+          ):
+            # Inputs for the previous ',' are not needed
+            for input_idx in ex.reads[prev_reads_idx]:
+              short_input_symbols[input_idx] = None
+            short_program.pop()
+          # Inputs read by the current instruction may be needed
+          for input_idx in ex.reads[idx]:
+            short_input_symbols[input_idx] = ex.input_symbols[input_idx]
+          prev_reads_idx = idx
+        if (
+          short_program
+          and short_program[-1] == ','
+          and instruction in ['-','+']
+        ):
+          # Modify the inputs read by ',' when they are immediately changed.
+          # This case is mutually exclusive with self-cancellation but both imply that
+          # instruction does not need to be appended.
+          # Because instruction is not ',', prev_reads_idx is the original index position
+          # of the previous ','. 
+          if instruction == '+':
+            for input_idx in ex.reads[prev_reads_idx]:
+              short_input_symbols[input_idx] = (short_input_symbols[input_idx] + 1) % self._alphabet_size
+          elif instruction == '-':
+            for input_idx in ex.reads[prev_reads_idx]:
+              short_input_symbols[input_idx] = (short_input_symbols[input_idx] - 1) % self._alphabet_size
+        elif (
+            short_program
+            and cancelling_ids.get(instruction, '') == short_program[-1]
+        ):
+          # Remove self-cancelling sequences such as '<>', '+-'.
+          # Remove the last instruction, and don't append the new one.
+          short_program.pop()
+        else:
+          short_program.append(instruction)
+      short_program = ''.join(short_program)
+      short_input_symbols = list(filter(lambda x: x is not None, short_input_symbols))
+      # Upper bound on the Solomonoff ln-loss. Note that we use
+      # program_tokens and not program_valid_tokens because when sampling
+      # we don't need to sample '{' (only '[').
+      short_ln_loss = self._sampler.program_ln_loss(short_program) + len(short_input_symbols)*np.log(self._alphabet_size)
+      long_ln_loss = self._sampler.program_ln_loss(ex.program2) + len(ex.input_symbols)*np.log(self._alphabet_size)
+    else:
+      short_program = None
+      short_input_symbols = None
+      short_ln_loss = None
+      long_ln_loss = None
+
+    return {
+        'status': status,
+        'alphabet_size': self._alphabet_size,
+        'num_steps': ex.num_steps,
+        'memory_index': ex.memory_index,
+        'output': "".join([chr(n) for n in ex.output]),
+        'output_length': len(ex.output),
+        'program': ex.program2,
+        'short_program': short_program,
+        # Upper bound on the (natural) log-loss of Solomonoff induction
+        # for the generated output, based on `short_program`.
+        'short_ln_loss': short_ln_loss,
+        'long_ln_loss': long_ln_loss,
+        'input_symbols': ex.input_symbols,
+        'short_input_symbols': short_input_symbols
+    }
+
+  def step(
+      self,
+      ex,
+  ):
+    mem = ex.memory[ex.memory_index]
+    new_instruction = False
+    if ex.program_index == len(ex.program2):
+      # We need to extend the program by one instruction.
+      if not ex.program:
+        instruction = self._sampler.get_sample(ex.program2)
+      elif ex.program_index == len(ex.program):
+        return self.make_result(ex, 'HALTED')  # perhaps should be END_OF_PROGRAM ?
+      else:
+        instruction = ex.program[ex.program_index]
+      # Fix the opening brackets.
+      if instruction == '[' and mem == 0:
+        instruction = '{'
+      elif instruction == '{' and mem != 0:
+        instruction = '['
+      ex.program2 += instruction
+      new_instruction = True
+
+    command = ex.program2[ex.program_index]
+    if self._print_trace:
+      print(
+          'program:',
+          ex.program2,
+          'num_steps:',
+          ex.num_steps,
+          'program_index:',
+          ex.program_index,
+          'command:',
+          command,
+          'memory_index:',
+          ex.memory_index,
+          'mem:',
+          mem,
+          'jumps:',
+          ex.jumps,
+          'unmatched_brackets:',
+          ex.unmatched_brackets,
+      )
+
+    match command:
+      case '+':
+        # Increment data cell value with wrap-around
+        ex.memory[ex.memory_index] = (mem + 1) % self._alphabet_size
+      case '-':
+        # Decrement data cell value with wrap-around.
+        ex.memory[ex.memory_index] = (mem - 1) % self._alphabet_size
+      case '.':
+        # Output command: we append to the output string.
+        # We use a string for convenience, but it should be view as a
+        # bytearray instead.
+        ex.output.append(mem)
+        # Reset the pointer to the first instruction that's sampled after
+        # the last print `.`.
+        ex.first_sampled_idx_after_print = len(ex.program2)
+      case '<':
+        # Move left on the tape.
+        ex.memory_index = (ex.memory_index - 1) % ex.memory_size
+      case '>':
+        # Move right on the tape.
+        ex.memory_index = (ex.memory_index + 1) % ex.memory_size
+      case '[':
+        if new_instruction:  # mem != 0 necessarily
+          # We need to enter the block but the body of the block does not
+          # exist yet, so we need to generate it here (at the end of the
+          # current program)
+          ex.unmatched_brackets.append(ex.program_index)
+        elif mem == 0:
+          # We need to skip the block
+          if ex.program_index not in ex.jumps:
+            # The body of the block has been generated, and we have jumped
+            # back to the opening bracket of the block.
+            # But the continuation of the block has not been generated yet, so
+            # we need to do so now, at the end of the program. Now we also
+            # know where to jump to, so we fill in the jumps table.
+            ex.jumps[ex.program_index] = len(ex.program2) - 1
+            ex.program_index = len(ex.program2) - 1
+          else:
+            # The continuation of the block already exists, so we jump to
+            # there.
+            ex.program_index = ex.jumps[ex.program_index]
+        else:  # mem == 1
+          # We enter the block, which already exists, and is next to
+          # program_index, so nothing to do.
+          pass
+      case '{':
+        if new_instruction:  # necessarily mem == 0
+          # Since mem == 0, this block is skipped for now.
+          # Hence we don't need to know what instructions the body of the
+          # block will be made of, and for now we only need to construct
+          # the sequence of instructions that come after the block (the
+          # continuation of the block).
+          # So we need to request more new instructions, which are placed
+          # right after this bracket (by contrast to '[').
+          # We do not register '{' as an unmatched opening bracket yet, and
+          # we will do so only once we need to generate the body of this
+          # block, that is, the next time we visit this '{' and jump[here]
+          # is not set.
+          pass
+        elif mem != 0:
+          # We need to enter the block.
+          if ex.program_index in ex.jumps:
+            # The block position is known and is at jumps[here].
+            ex.program_index = ex.jumps[ex.program_index]
+          else:
+            # The block position is not yet known, which means the block
+            # has not been constructed yet, and we need to do so now, at the
+            # end of the program.
+            block_pos = len(ex.program2) - 1
+            ex.jumps[ex.program_index] = block_pos
+            # Now that the block is being generated, we can wait for the
+            # matching closing bracket to be produced.
+            ex.unmatched_brackets.append(ex.program_index)
+            ex.program_index = block_pos
+        else:
+          # Not a new instruction, mem == 0, we need to move the pointer to
+          # the continuation of the block, which is right after the current
+          # instruction, so there's actually nothing to do.
+          pass
+      case ']':
+          # Unconditional jump. Wikipedia mentions that we could check the
+          # condition here too to avoid one step, but treating it as
+          # unconditional makes the logic simpler and avoids more bugs (since
+          # we have complicated the logic somewhat).
+          if new_instruction:
+            if ex.unmatched_brackets:
+              # We just generated a closing bracket, and there are some
+              # opening bracket hanging, so we match these two.
+              open_pos = ex.unmatched_brackets.pop()
+              ex.jumps[ex.program_index] = open_pos
+              # Jump to there. -1 to ensure the next instruction is the
+              # opening bracket.
+              ex.program_index = open_pos - 1
+            else:
+              # This is an unmatched closing bracket, we just skip it.
+              ex.jumps[ex.program_index] = ex.program_index
+          else:
+            # -1 to ensure the next instruction is the opening bracket.
+            ex.program_index = ex.jumps[ex.program_index] - 1
+      case ',':
+        if ex.inputs_read < len(ex.input_symbols):
+          ex.memory[ex.memory_index] = ex.input_symbols[ex.inputs_read]
+        else:
+          random_symbol = np.random.choice(self._alphabet_size)
+          ex.memory[ex.memory_index] = random_symbol
+          ex.input_symbols.append(random_symbol)
+        if ex.program_index not in ex.reads:
+          ex.reads[ex.program_index] = [ex.inputs_read]
+        else:
+          ex.reads[ex.program_index].append(ex.inputs_read)
+        ex.inputs_read += 1  
+      case '?':
+        next = ex.get_next_chronological()
+        if next is None:
+          # This cancels the ordinary right move so that we attempt
+          # to read again during the next step.
+          ex.program_index -= 1 # TODO: perhaps "waiting" is a better name
+        else:
+          ex.memory[ex.memory_index] = next       
+      case _:
+        raise IncorrectProgramError(
+            f'Character {command} is not recognized. All '
+            'characters in the input program must be part of the set ('
+            f'{",".join(self.program_tokens)}).',
+        )
+    ex.program_index += 1
+    ex.num_steps += 1
+    if ex.num_steps == ex.maximum_steps:
+      return self.make_result(ex, 'TIMEOUT')
+    if len(ex.output) >= ex.max_output_length:
+      return self.make_result(ex, 'OUTPUT_LIMIT')
+    return self.make_result(ex, "RUNNING")
 
   def run_program(
       self,
@@ -411,332 +783,174 @@ class BrainPhoqueUTM(UniversalTuringMachine):
       IncorrectProgramError: If some tokens of the program are not in
         `self.program_tokens`.
     """
-    # The index of the pointer moving on the program string.
-    program_index = 0
-    # The memory tape, initialised with all zeros. Can only contain integers
-    # between 0 and alphabet size - 1.
-    memory = [0] * memory_size
-    # The index of the pointer moving on the memory tape.
-    memory_index = 0
-    # The output is a string.
-    output = ''
-    # We count the number of steps to stop if it's too high.
-    num_steps = 0
-    # Dictionary of places to jump to on brackets.
-    jumps = {}
-    unmatched_brackets = []
-    # Program to construct either from `program`, or by sampling instructions.
-    program2 = ''
-    # Keep track of the instructions that are sampled after the last print `.`
-    # evaluation.
-    first_sampled_idx_after_print = len(program)
 
-    if input_symbols is None:
-      input_symbols = []
-    inputs_read = 0
-    # Dictionary of input indices corresponding to each ','
-    reads = {}
-
-    def make_result(status: str) -> RunResult:
-      # This function is nested because it requires access to many of the
-      # local variables of the enclosing function, and passing so many arguments
-      # wouldn't be more readable or more efficient.
-      # Using class fields for all these temporary variables would be rather
-      # clunky too.
-      """Returns the dictionary to be returned by `run_program`.
-
-      See the docstring for `run_program`.
-
-      Args:
-        status: The reason why the program has finished.
-      """
-      # Reduce the program to an equivalent program (apart from smaller size
-      # computation steps), by removing unnecessary brackets, self-cancelling
-      # pairs of instructions (e.g., '+-'), and instructions that are evaluated
-      # for the first time after the last print `.` operations. See below for
-      # details.
-      # This takes linear time with the length of the original program.
-      # The resulting program is never slower than the original one.
-      #   For example, one could reduce '+[..]' to '+[.]' which is semantically
-      #   equivalent, but twice as slow due to the time required by the
-      #   brackets.
-      if self._shorten_program:
-        short_program = []
-        # The shortened input will be filled with only the minimal necessary input
-        # symbols. None's correspond to reads that never take place because of removed
-        # ',' instructions.  
-        short_input_symbols = [None]*len(input_symbols)
-        # Because we make only one pass over the program, we need to track the original
-        # index position of the last ',' instruction so that its input symbols can be 
-        # erased if we determine they are overwritten by another ',' instruction.
-        prev_reads_idx = None
-        # No need to include {'[': ']} because infinite loops that are evaluated
-        # are removed automatically using `first_sampled_idx_after_print`, while
-        # infinite loops that are skipped cannot be generated, since the open
-        # bracket would be '{' and the body would not be generated, and the
-        # hanging '{' would later be removed by the code below.
-        cancelling_ids = {'+': '-', '-': '+', '<': '>', '>': '<'}
-        for idx, instruction in enumerate(program2):
-          if idx == first_sampled_idx_after_print:
-            # Remove all instructions that are sampled after the last evaluation
-            # of a print `.` instruction. The program remains consistent with
-            # the output. This gives a better lower-bound on the prediction
-            # probability of Solomonoff Induction.
-            # In particular, this removes all infinite loops that use the print
-            # operation.
-            # Due to the property that newly sampled instructions are always
-            # appended (at the end) to the program, it's just a matter of
-            # keeping track the index of the first sampled operation after a `.`
-            # is evaluated.
-            break
-          if instruction == '[' and idx in unmatched_brackets:
-            # Remove '[' that are in unmatched_brackets, but not those that are
-            # not in jumps! (it just means they don't have a continuation).
-            continue
-          if instruction == '{' and idx not in jumps:
-            # Remove '{' that are not in jumps (they have no body), but not
-            # those that are in unmatched (it just means the body hasn't been
-            # finished when the program stopped, but they are still in jumps).
-            continue
-          if instruction == ']' and jumps[idx] == idx:
-            # Remove ']' that jump to themselves (= skip).
-            continue
-          if instruction == ',':
-            # Remove instructions with results erased by ','.
-            while (
-              short_program
-              and short_program[-1] in ['-','+']
-            ):
-              short_program.pop()
-            if (
-              short_program
-              and short_program[-1] == ','
-            ):
-              # Inputs for the previous ',' are not needed
-              for input_idx in reads[prev_reads_idx]:
-                short_input_symbols[input_idx] = None
-              short_program.pop()
-            # Inputs read by the current instruction may be needed
-            for input_idx in reads[idx]:
-              short_input_symbols[input_idx] = input_symbols[input_idx]
-            prev_reads_idx = idx
-          if (
-            short_program
-            and short_program[-1] == ','
-            and instruction in ['-','+']
-          ):
-            # Modify the inputs read by ',' when they are immediately changed.
-            # This case is mutually exclusive with self-cancellation but both imply that
-            # instruction does not need to be appended.
-            # Because instruction is not ',', prev_reads_idx is the original index position
-            # of the previous ','. 
-            if instruction == '+':
-              for input_idx in reads[prev_reads_idx]:
-                short_input_symbols[input_idx] = (short_input_symbols[input_idx] + 1) % self._alphabet_size
-            elif instruction == '-':
-              for input_idx in reads[prev_reads_idx]:
-                short_input_symbols[input_idx] = (short_input_symbols[input_idx] - 1) % self._alphabet_size
-          elif (
-              short_program
-              and cancelling_ids.get(instruction, '') == short_program[-1]
-          ):
-            # Remove self-cancelling sequences such as '<>', '+-'.
-            # Remove the last instruction, and don't append the new one.
-            short_program.pop()
-          else:
-            short_program.append(instruction)
-        short_program = ''.join(short_program)
-        short_input_symbols = list(filter(lambda x: x is not None, short_input_symbols))
-        # Upper bound on the Solomonoff ln-loss. Note that we use
-        # program_tokens and not program_valid_tokens because when sampling
-        # we don't need to sample '{' (only '[').
-        short_ln_loss = self._sampler.program_ln_loss(short_program) + len(short_input_symbols)*np.log(self._alphabet_size)
-        long_ln_loss = self._sampler.program_ln_loss(program2) + len(input_symbols)*np.log(self._alphabet_size)
-      else:
-        short_program = None
-        short_input_symbols = None
-        short_ln_loss = None
-        long_ln_loss = None
-
-      return {
-          'status': status,
-          'alphabet_size': self._alphabet_size,
-          'num_steps': num_steps,
-          'memory_index': memory_index,
-          'output': output,
-          'output_length': len(output),
-          'program': program2,
-          'short_program': short_program,
-          # Upper bound on the (natural) log-loss of Solomonoff induction
-          # for the generated output, based on `short_program`.
-          'short_ln_loss': short_ln_loss,
-          'long_ln_loss': long_ln_loss,
-          'input_symbols': input_symbols,
-          'short_input_symbols': short_input_symbols
-      }
+    ex = self.ExecutionContext(program, memory_size, maximum_steps, max_output_length, input_symbols)
 
     # Program evaluation loop, possibly with program generation at the same
     # time.
     while True:
-      mem = memory[memory_index]
-      new_instruction = False
-      if program_index == len(program2):
-        # We need to extend the program by one instruction.
-        if not program:
-          instruction = self._sampler.get_sample(program2)
-        elif program_index == len(program):
-          return make_result('HALTED')  # perhaps should be END_OF_PROGRAM ?
-        else:
-          instruction = program[program_index]
-        # Fix the opening brackets.
-        if instruction == '[' and mem == 0:
-          instruction = '{'
-        elif instruction == '{' and mem != 0:
-          instruction = '['
-        program2 += instruction
-        new_instruction = True
+      res = self.step(ex)
+      if not res['status'] == 'RUNNING':
+        return res
 
-      command = program2[program_index]
-      if self._print_trace:
-        print(
-            'program:',
-            program2,
-            'num_steps:',
-            num_steps,
-            'program_index:',
-            program_index,
-            'command:',
-            command,
-            'memory_index:',
-            memory_index,
-            'mem:',
-            mem,
-            'jumps:',
-            jumps,
-            'unmatched_brackets:',
-            unmatched_brackets,
-        )
+class ChronologicalUTMPair:
+  def __init__(
+      self,
+      agent_utm : UniversalTuringMachine,
+      env_utm : UniversalTuringMachine,
+  ):
+    """Assumes agent and env utm's have the same alphabet size."""
+    self._agent_utm = agent_utm
+    self._env_utm = env_utm
+  @property
+  def agent_utm(self):
+    return self._agent_utm
+  @property
+  def env_utm(self):
+    return self._env_utm
+  @property
+  def alphabet_size(self):
+    return self._agent_utm.alphabet_size
+  def run_programs(
+      self,
+      agent_program: str,
+      env_program: str,
+      memory_size: int,
+      maximum_steps: int,
+      max_output_length: int,
+      agent_input_symbols: list = None,
+      env_input_symbols: list = None,
+  ) -> RunResult:
+    agent_ex = self._agent_utm.ExecutionContext(
+      agent_program,
+      memory_size,
+      maximum_steps,
+      max_output_length,
+      agent_input_symbols,
+    )
+    env_ex = self._env_utm.ExecutionContext(
+      env_program,
+      memory_size,
+      maximum_steps,
+      max_output_length,
+      env_input_symbols,
+    )
+    agent_ex.set_chronological_inputs(env_ex.output)
+    env_ex.set_chronological_inputs(agent_ex.output)
+    utms = [self._agent_utm, self._env_utm]
+    ex = [agent_ex, env_ex]
+    statuses = ['RUNNING', 'RUNNING']
 
-      match command:
-        case '+':
-          # Increment data cell value with wrap-around
-          memory[memory_index] = (mem + 1) % self._alphabet_size
-        case '-':
-          # Decrement data cell value with wrap-around.
-          memory[memory_index] = (mem - 1) % self._alphabet_size
-        case '.':
-          # Output command: we append to the output string.
-          # We use a string for convenience, but it should be view as a
-          # bytearray instead.
-          output += chr(mem)
-          # Reset the pointer to the first instruction that's sampled after
-          # the last print `.`.
-          first_sampled_idx_after_print = len(program2)
-        case '<':
-          # Move left on the tape.
-          memory_index = (memory_index - 1) % memory_size
-        case '>':
-          # Move right on the tape.
-          memory_index = (memory_index + 1) % memory_size
-        case '[':
-          if new_instruction:  # mem != 0 necessarily
-            # We need to enter the block but the body of the block does not
-            # exist yet, so we need to generate it here (at the end of the
-            # current program)
-            unmatched_brackets.append(program_index)
-          elif mem == 0:
-            # We need to skip the block
-            if program_index not in jumps:
-              # The body of the block has been generated, and we have jumped
-              # back to the opening bracket of the block.
-              # But the continuation of the block has not been generated yet, so
-              # we need to do so now, at the end of the program. Now we also
-              # know where to jump to, so we fill in the jumps table.
-              jumps[program_index] = len(program2) - 1
-              program_index = len(program2) - 1
-            else:
-              # The continuation of the block already exists, so we jump to
-              # there.
-              program_index = jumps[program_index]
-          else:  # mem == 1
-            # We enter the block, which already exists, and is next to
-            # program_index, so nothing to do.
-            pass
-        case '{':
-          if new_instruction:  # necessarily mem == 0
-            # Since mem == 0, this block is skipped for now.
-            # Hence we don't need to know what instructions the body of the
-            # block will be made of, and for now we only need to construct
-            # the sequence of instructions that come after the block (the
-            # continuation of the block).
-            # So we need to request more new instructions, which are placed
-            # right after this bracket (by contrast to '[').
-            # We do not register '{' as an unmatched opening bracket yet, and
-            # we will do so only once we need to generate the body of this
-            # block, that is, the next time we visit this '{' and jump[here]
-            # is not set.
-            pass
-          elif mem != 0:
-            # We need to enter the block.
-            if program_index in jumps:
-              # The block position is known and is at jumps[here].
-              program_index = jumps[program_index]
-            else:
-              # The block position is not yet known, which means the block
-              # has not been constructed yet, and we need to do so now, at the
-              # end of the program.
-              block_pos = len(program2) - 1
-              jumps[program_index] = block_pos
-              # Now that the block is being generated, we can wait for the
-              # matching closing bracket to be produced.
-              unmatched_brackets.append(program_index)
-              program_index = block_pos
-          else:
-            # Not a new instruction, mem == 0, we need to move the pointer to
-            # the continuation of the block, which is right after the current
-            # instruction, so there's actually nothing to do.
-            pass
-        case ']':
-            # Unconditional jump. Wikipedia mentions that we could check the
-            # condition here too to avoid one step, but treating it as
-            # unconditional makes the logic simpler and avoids more bugs (since
-            # we have complicated the logic somewhat).
-            if new_instruction:
-              if unmatched_brackets:
-                # We just generated a closing bracket, and there are some
-                # opening bracket hanging, so we match these two.
-                open_pos = unmatched_brackets.pop()
-                jumps[program_index] = open_pos
-                # Jump to there. -1 to ensure the next instruction is the
-                # opening bracket.
-                program_index = open_pos - 1
-              else:
-                # This is an unmatched closing bracket, we just skip it.
-                jumps[program_index] = program_index
-            else:
-              # -1 to ensure the next instruction is the opening bracket.
-              program_index = jumps[program_index] - 1
-        case ',':
-          if inputs_read < len(input_symbols):
-            memory[memory_index] = input_symbols[inputs_read]
-          else:
-            random_symbol = np.random.choice(self._alphabet_size)
-            memory[memory_index] = random_symbol
-            input_symbols.append(random_symbol)
-          if program_index not in reads:
-            reads[program_index] = [inputs_read]
-          else:
-            reads[program_index].append(inputs_read)
-          inputs_read += 1         
-        case _:
-          raise IncorrectProgramError(
-              f'Character {command} is not recognized. All '
-              'characters in the input program must be part of the set ('
-              f'{",".join(self.program_tokens)}).',
-          )
-      program_index += 1
-      num_steps += 1
-      if num_steps == maximum_steps:
-        return make_result('TIMEOUT')
-      if len(output) >= max_output_length:
-        return make_result('OUTPUT_LIMIT')
+    while statuses[0]=='RUNNING' or statuses[1]=='RUNNING':
+      for i in range(len(utms)):
+        if statuses[i] == 'RUNNING':
+          res = utms[i].step(ex[i])
+          statuses[i] = res['status']
+    results = []
+    for i in range(len(utms)):
+      results.append(utms[i].make_result(ex[i], statuses[i]))
+    final_t = min([len(res['output']) for res in results])
+    return {
+      'ae': [res['output'][:final_t] for res in results],
+      'output_length': final_t,
+      'percepts_read': agent_ex.chronological_index,
+      'actions_read': env_ex.chronological_index,
+      'agent_result':results[0], 
+      'env_result':results[1]
+    }
+
+def manual_interaction_loop(
+    env_utm : UniversalTuringMachine,
+    env_program: str,
+    memory_size: int,
+    maximum_steps: int,
+    max_output_length: int,
+    agent_input_symbols: list = None,
+    env_input_symbols: list = None,
+):
+  env_ex = env_utm.ExecutionContext(
+    env_program,
+    memory_size,
+    maximum_steps,
+    max_output_length,
+    env_input_symbols,
+  )
+  user_inputs = []
+  env_ex.set_chronological_inputs(user_inputs)
+  status = 'RUNNING'
+  for i in range(1, max_output_length+1):
+    print(f"env program: {env_ex.program2}")
+    next_a = int(input("Next action:"))
+    user_inputs.append(next_a)
+    while len(env_ex.output) < i and status == 'RUNNING':
+      res = env_utm.step(env_ex)
+      status = res['status']
+    if not (status == 'RUNNING'):
+      break
+    else:
+      print(f"Percepts: {env_ex.output}")
+  result = env_utm.make_result(env_ex, res)
+  return {
+    'ae': [user_inputs, result['output']],
+    'output_length': i,
+    'actions_read': env_ex.chronological_index,
+    'env_result':result
+  }
+
+  # while statuses[0]=='RUNNING' or statuses[1]=='RUNNING':
+  #   for i in range(len(utms)):
+  #     if statuses[i] == 'RUNNING':
+  #       res = utms[i].step(ex[i])
+  #       statuses[i] = res['status']
+  # results = []
+  # for i in range(len(utms)):
+  #   results.append(utms[i].make_result(ex[i], statuses[i]))
+  # final_t = min([len(res['output']) for res in results])
+  # return {
+  #   'ae': [res['output'][:final_t] for res in results],
+  #   'output_length': final_t,
+  #   'percepts_read': agent_ex.chronological_index,
+  #   'actions_read': env_ex.chronological_index,
+  #   'agent_result':results[0], 
+  #   'env_result':results[1]
+  # }
+
+if __name__ == "__main__":
+  from neural_networks_solomonoff_induction.data import utms as utms_lib
+  rng = np.random.default_rng(seed=1)
+  program_sampler = utms_lib.FastSampler(rng=rng)
+  # seems there's no problem sharing the program sampler
+
+  # cutm = ChronologicalUTMPair(
+  #   BrainPhoqueUTM(program_sampler, use_chronological_instruction=True, use_input_instruction=True, shorten_program=True), 
+  #   BrainPhoqueUTM(program_sampler, use_chronological_instruction=True, use_input_instruction=True, shorten_program=True),
+  # )
+  # for i in range(100):
+  #   results = cutm.run_programs(
+  #     agent_program='',
+  #     env_program='',
+  #     memory_size=100,
+  #     maximum_steps=200,
+  #     max_output_length=100,
+  #   )
+  #   if results['percepts_read'] and results['actions_read']:
+  #     print(results)
+
+
+  # results = cutm.run_programs(
+  #   agent_program='<>+>,+->{<,-],?',
+  #   env_program='>>]]>]],.<]+,+.,?',
+  #   memory_size=100,
+  #   maximum_steps=200,
+  #   max_output_length=100,
+  # )
+  
+  env_utm = BrainPhoqueUTM(program_sampler, use_chronological_instruction=True, use_input_instruction=True, shorten_program=True)
+  for i in range(10):
+    manual_interaction_loop(
+      env_utm=env_utm,
+      env_program='',#program_sampler.get_sample(''), 
+      memory_size=100,
+      maximum_steps=200,
+      max_output_length=10,
+    )
