@@ -48,7 +48,7 @@ def get_interacting_programs(log_dict):
    return prog_results
 
 if __name__ == "__main__":
-   ctx_name = 'ctx_filtered_chronological2.pyd'
+   ctx_name = 'ctx_filtered_chronological3.pyd'
    mode = "CHRONOLOGICAL" # "SEQUENTIAL"
    examples = 100000 # divisible by batch size
    seq_length = 3000
@@ -68,6 +68,13 @@ if __name__ == "__main__":
 
    rng = np.random.default_rng(seed=1)
    program_sampler = utms_lib.FastSampler(rng=rng)
+
+   # Recursive refinement:
+   program_sampler = utms_lib.MCSampler(
+    rng=rng,
+    filename="data/ctx_filtered_chronological2.pyd",
+    #force_static=True,
+  )
 
    def get_utm(is_chronological):
       return utms_lib.BrainPhoqueUTM(

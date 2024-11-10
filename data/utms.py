@@ -154,6 +154,7 @@ class MCSampler(ProgramSampler):
       rng: np.random.Generator,
       filename: str = 'ctx2_filtered.pyd',
       alpha: float = 0.5,
+      force_static = False,
   ):
     """Initializes the sampler.
 
@@ -190,6 +191,7 @@ class MCSampler(ProgramSampler):
       s = np.sum(dist) + alpha * len(dist)
       self._distributions[ctx] = [(x + alpha) / s for x in dist]
     # Call this here also, to avoid having to call it in tests.
+    self.force_static = force_static
 
   def set_tokens(self, tokens: Sequence[str]) -> None:
     """Ignored. Tokens are set from file data.
@@ -212,6 +214,9 @@ class MCSampler(ProgramSampler):
     ctx = program[-self._ctx_len :]
     dist = self._distributions.get(ctx, None)
     instruction = self._rng.choice(list(self._tokens), p=dist)
+    if self.force_static:
+      if instruction == '{':
+        instruction = '['
     return instruction
 
   # WARNING: The probability of the short program may be lower
@@ -425,6 +430,33 @@ class BrainPhoqueUTM(UniversalTuringMachine):
         return sym
       else:
         return None
+    def statically_calculate_jumps(self):
+      """
+      This should only be used when the program was sampled statically,
+      not through execution - the { instruction should not occur since its
+      semantics (and jumps) depend on how the program was sampled. 
+      For MCSampler, use force_static.
+      """
+      stack = []
+      for i, s in enumerate(self.program):
+        if s == '[':
+          stack.append(i)
+        elif s == ']':
+          if stack:
+            # Pair the brackets
+            open = stack.pop()
+            self.jumps[i] = open
+            self.jumps[open] = i
+      # I suppose the rest just jump off the end of the program?
+      i = 0
+      while stack:
+        open = stack.pop()
+        self.jumps[i+len(self.program)] = open
+        self.jumps[open] = i+len(self.program)
+        i += 1
+      self.program += i*']'
+      self.program2 = self.program
+
   
   def make_result(self, ex : ExecutionContext, status: str) -> RunResult:
     # This function is nested because it requires access to many of the
@@ -644,6 +676,8 @@ class BrainPhoqueUTM(UniversalTuringMachine):
             # But the continuation of the block has not been generated yet, so
             # we need to do so now, at the end of the program. Now we also
             # know where to jump to, so we fill in the jumps table.
+            # TODO: this seems to not work when the program is sampled in its entirety
+            # with MCSampler?
             ex.jumps[ex.program_index] = len(ex.program2) - 1
             ex.program_index = len(ex.program2) - 1
           else:
@@ -706,8 +740,12 @@ class BrainPhoqueUTM(UniversalTuringMachine):
               # This is an unmatched closing bracket, we just skip it.
               ex.jumps[ex.program_index] = ex.program_index
           else:
-            # -1 to ensure the next instruction is the opening bracket.
-            ex.program_index = ex.jumps[ex.program_index] - 1
+            # this check is only necessary for static generation
+            if ex.program_index in ex.jumps:
+              # -1 to ensure the next instruction is the opening bracket.
+              ex.program_index = ex.jumps[ex.program_index] - 1
+            else:
+              pass
       case ',':
         if ex.inputs_read < len(ex.input_symbols):
           ex.memory[ex.memory_index] = ex.input_symbols[ex.inputs_read]
@@ -875,12 +913,14 @@ def manual_interaction_loop(
     max_output_length,
     env_input_symbols,
   )
+  env_ex.statically_calculate_jumps()
   user_inputs = []
   env_ex.set_chronological_inputs(user_inputs)
   status = 'RUNNING'
+  print(f"env program: {env_ex.program}")
   for i in range(1, max_output_length+1):
-    print(f"env program: {env_ex.program2}")
-    next_a = int(input("Next action:"))
+    #print(f"env program: {env_ex.program2}")
+    next_a = int(input("Next action:")) % env_utm.alphabet_size
     user_inputs.append(next_a)
     while len(env_ex.output) < i and status == 'RUNNING':
       res = env_utm.step(env_ex)
@@ -894,7 +934,8 @@ def manual_interaction_loop(
     'ae': [user_inputs, result['output']],
     'output_length': i,
     'actions_read': env_ex.chronological_index,
-    'env_result':result
+    'env_result': result,
+    'score': sum(env_ex.output)
   }
 
   # while statuses[0]=='RUNNING' or statuses[1]=='RUNNING':
@@ -918,7 +959,12 @@ def manual_interaction_loop(
 if __name__ == "__main__":
   from neural_networks_solomonoff_induction.data import utms as utms_lib
   rng = np.random.default_rng(seed=1)
-  program_sampler = utms_lib.FastSampler(rng=rng)
+  #program_sampler = utms_lib.FastSampler(rng=rng)
+  program_sampler = utms_lib.MCSampler(
+    rng=rng,
+    filename="data/ctx_filtered_chronological2.pyd",
+    force_static=True,
+  )
   # seems there's no problem sharing the program sampler
 
   # cutm = ChronologicalUTMPair(
@@ -945,12 +991,30 @@ if __name__ == "__main__":
   #   max_output_length=100,
   # )
   
-  env_utm = BrainPhoqueUTM(program_sampler, use_chronological_instruction=True, use_input_instruction=True, shorten_program=True)
+  env_utm = BrainPhoqueUTM(
+    program_sampler,
+    alphabet_size=2,
+    use_chronological_instruction=True,
+    use_input_instruction=True,
+    shorten_program=False,
+  )
+  print("Beginning manual control...")
+  print("Your goal is to maximize the sum of output (reward)")
+  print(f"Cell contents are mod {env_utm.alphabet_size}")
+  print("Instructions:")
+  print(". := Output current cell value")
+  print("? := Write next unread user action")
+  print(", := Write a random number")
+  print("> := Move one cell right")
+  print("< := Move one cell left")
+  print("[ := Jump instruction head to next ] if current cell is 0")
+  print("] := Jump instruction head to last [ if there is one")
   for i in range(10):
-    manual_interaction_loop(
+    res = manual_interaction_loop(
       env_utm=env_utm,
-      env_program='',#program_sampler.get_sample(''), 
+      env_program=program_sampler.sample_program(20),
       memory_size=100,
       maximum_steps=200,
       max_output_length=10,
     )
+    print(f"Score: {res['score']}")
