@@ -211,13 +211,13 @@ def main(_) -> None:
       memory_size=200, # matches optimize_Q
       maximum_steps=1024, # matches optimize_Q
       tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
-      maximum_program_length=100,
+      maximum_program_length=256,
   )
 
   params, loss = train_transformer_decoder(
       data_generator=data_generator,
-      training_steps=200,#500000,
-      log_every=50,# 250,
+      training_steps=500000,
+      log_every=250,
   )
   logging.info('Final loss: %f', loss)
 

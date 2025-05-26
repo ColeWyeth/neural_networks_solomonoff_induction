@@ -11,6 +11,8 @@ import optax
 import tqdm
 import tree
 
+import pickle
+
 from neural_networks_solomonoff_induction.data import data_generator as dg_lib
 from neural_networks_solomonoff_induction.data import utm_data_generator as utm_dg_lib
 from neural_networks_solomonoff_induction.data import utms as utms_lib
@@ -38,14 +40,14 @@ utm = utms_lib.BrainPhoqueUTM(
     use_input_instruction = probabilistic,
 )
 data_generator = utm_dg_lib.UTMDataGenerator(
-    batch_size=50,
+    batch_size=10000,
     seq_length=256,
     rng=rng,
     utm=utm,
     memory_size=200, # matches optimize_Q
     maximum_steps=1024, # matches optimize_Q
     tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
-    maximum_program_length=100,
+    maximum_program_length=256,
 )
 
 batch, log_dict = data_generator.sample()
@@ -55,6 +57,32 @@ print(batch.shape)
 binary_batch = batch.argmax(axis=-1)
 print(binary_batch.shape)
 #print(f"{binary_batch=}")
-for row in binary_batch:
-    print(row[:30])
+# for row in binary_batch:
+#     print(row[:30])
 #print(log_dict)
+
+with open('binary_batch_log_dict.pkl', 'wb') as f:
+    pickle.dump((binary_batch,log_dict),f)
+
+if False:
+    config = transformer.TransformerConfig(vocab_size=alphabet_size)
+    model = hk.transform(
+        functools.partial(transformer.transformer_decoder, config=config)
+    )
+    fname = "params.npz"
+    with open(fname, "rb") as f:
+        loaded_params = np.load(f, allow_pickle=True)
+        params = dict(loaded_params)
+        for k in params.keys():
+            params[k] = params[k].item()
+    conditionals = model.apply(
+        params=params,
+        targets=binary_batch,
+        rng=None,
+    )
+    print(f"{conditionals.shape=}")
+    true_conditionals = jnp.take_along_axis(
+        conditionals, binary_batch[..., None], axis=-1
+    )[..., 0]
+    print(true_conditionals)
+    # still need to handle masking, see _make_loss_fn
