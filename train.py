@@ -149,7 +149,7 @@ def train_transformer_decoder(
   grad_fn = jax.value_and_grad(loss_fn, has_aux=False)
 
   # Make optimizer, to apply the gradients.
-  optimizer = optax.adam(learning_rate=1e-4)
+  optimizer = optax.adam(learning_rate=1e-4) # matches paper
   opt_state = optimizer.init(params)
 
   logging.info('Initialization done, starting training...')
@@ -179,6 +179,8 @@ def train_transformer_decoder(
           logs['loss'],
           logs['grad_norm_unclipped'],
       )
+      np.savez('params.npz', **params)
+      logging.info('Parameters saved in file params.npz')
     last_loss = logs['loss']
 
   return params, last_loss
@@ -186,24 +188,36 @@ def train_transformer_decoder(
 
 def main(_) -> None:
   """Trains a model and save the parameters to a file."""
+  alphabet_size = 2
+  probabilistic = True
   rng = np.random.default_rng(seed=1)
-  program_sampler = utms_lib.FastSampler(rng=rng)
-  utm = utms_lib.BrainPhoqueUTM(program_sampler)
+  # program_sampler = utms_lib.FastSampler(rng=rng)
+  program_sampler = utms_lib.MCSampler(
+    rng=rng,
+    filename='data/ctx_filtered_binary_probabilistic.pyd', # possibly data/ is necessary
+  )
+  utm = utms_lib.BrainPhoqueUTM(
+    program_sampler,
+    alphabet_size = alphabet_size,
+    print_trace = False,
+    shorten_program = True,
+    use_input_instruction = probabilistic,
+  )
   data_generator = utm_dg_lib.UTMDataGenerator(
-      batch_size=32,
+      batch_size=128,
       seq_length=256,
       rng=rng,
       utm=utm,
-      memory_size=10,
-      maximum_steps=100,
+      memory_size=200, # matches optimize_Q
+      maximum_steps=1024, # matches optimize_Q
       tokenizer=utm_dg_lib.Tokenizer.ASCII,
       maximum_program_length=100,
   )
 
   params, loss = train_transformer_decoder(
       data_generator=data_generator,
-      training_steps=100,
-      log_every=10,
+      training_steps=200,#500000,
+      log_every=50,# 250,
   )
   logging.info('Final loss: %f', loss)
 
