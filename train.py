@@ -210,7 +210,7 @@ def main(_) -> None:
       utm=utm,
       memory_size=200, # matches optimize_Q
       maximum_steps=1024, # matches optimize_Q
-      tokenizer=utm_dg_lib.Tokenizer.ASCII,
+      tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
       maximum_program_length=100,
   )
 
