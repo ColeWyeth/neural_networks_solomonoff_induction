@@ -16,9 +16,11 @@ import pickle
 import matplotlib.pyplot as plt
 
 import sys
+# import os
+# sys.path.insert(0, os.path.abspath(".."))
 nnsi_path = "/root/neural_networks_solomonoff_induction/.."
 if f"{nnsi_path}" not in sys.path:
-    sys.path.append(f"{nnsi_path}")
+    sys.path.insert(0,f"{nnsi_path}")
 
 from neural_networks_solomonoff_induction.data import data_generator as dg_lib
 from neural_networks_solomonoff_induction.data import utm_data_generator as utm_dg_lib
@@ -29,106 +31,95 @@ alphabet_size = 2
 probabilistic = True
 length = 256
 
-# generate_fresh_batch = False
+generate_fresh_batch = True
 # visualize = True
 
 rng = np.random.default_rng(seed=8)
 
 # %%
-program_sampler = utms_lib.MCSampler(
-    rng=rng,
-    filename='data/ctx_filtered_binary_probabilistic.pyd', # possibly data/ is necessary
-)
-# for i in range(10):
-#     p = program_sampler.sample_program(length)
-#     print(p)
+if generate_fresh_batch:
+    program_sampler = utms_lib.MCSampler(
+        rng=rng,
+        filename='data/ctx_filtered_binary_probabilistic.pyd', # possibly data/ is necessary
+    )
+    # for i in range(10):
+    #     p = program_sampler.sample_program(length)
+    #     print(p)
 
-utm = utms_lib.BrainPhoqueUTM(
-    program_sampler,
-    alphabet_size = alphabet_size,
-    print_trace = False,
-    shorten_program = True,
-    use_input_instruction = probabilistic,
-)
-data_generator = utm_dg_lib.UTMDataGenerator(
-    batch_size=1,
-    seq_length=256,
-    rng=rng,
-    utm=utm,
-    memory_size=200, # matches optimize_Q
-    maximum_steps=1024, # matches optimize_Q
-    tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
-    maximum_program_length=256,
-)
+    utm = utms_lib.BrainPhoqueUTM(
+        program_sampler,
+        alphabet_size = alphabet_size,
+        print_trace = False,
+        shorten_program = True,
+        use_input_instruction = probabilistic,
+    )
+    data_generator = utm_dg_lib.UTMDataGenerator(
+        batch_size=1000,
+        seq_length=256,
+        rng=rng,
+        utm=utm,
+        memory_size=200, # matches optimize_Q
+        maximum_steps=1024, # matches optimize_Q
+        tokenizer=utm_dg_lib.Tokenizer.SEQ_POSITION,
+        maximum_program_length=256,
+    )
 
-batch, log_dict = data_generator.sample()
-batch = np.array(batch)
+    batch, log_dict = data_generator.sample()
+    batch = np.array(batch)
 
-print(batch.shape)
-binary_batch = batch.argmax(axis=-1)
-print(binary_batch.shape)
-#print(f"{binary_batch=}")
-for row in binary_batch:
-    print(row)
-print(log_dict)
+    print(batch.shape)
+    binary_batch = batch.argmax(axis=-1)
+    print(binary_batch.shape)
+    #print(f"{binary_batch=}")
+    for row in binary_batch:
+        print(row)
+    print(log_dict)
 
-# with open('binary_batch_log_dict.pkl', 'wb') as f:
-#     pickle.dump((binary_batch,log_dict),f)
+    with open('binary_batch_log_dict.pkl', 'wb') as f:
+        pickle.dump((binary_batch,log_dict),f)
 
-# with open('binary_batch_log_dict.pkl', 'rb') as f:
-#     binary_batch, log_dict = pickle.load(f)
-
-# %%
-config = transformer.TransformerConfig(vocab_size=alphabet_size)
-model = hk.transform(
-    functools.partial(transformer.transformer_decoder, config=config)
-)
-fname = "params_mid_train.npz"
-with open(fname, "rb") as f:
-    loaded_params = np.load(f, allow_pickle=True)
-    params = dict(loaded_params)
-    for k in params.keys():
-        params[k] = params[k].item()
-conditionals = model.apply(
-    params=params,
-    targets=binary_batch,
-    rng=None,
-)
-print(f"{conditionals.shape=}")
-true_conditionals = jnp.take_along_axis(
-    conditionals, binary_batch[..., None], axis=-1
-)[..., 0]
-true_conditionals = jnp.where(log_dict['loss_mask'], 0.0, true_conditionals)
-print(true_conditionals)
-cond_probs = jax.numpy.exp(true_conditionals) # don't take seriously, check mask
-
-avg_log_loss = -true_conditionals.mean(axis=0)
-avg_cond_prob = cond_probs.mean(0)
-print(f"{avg_log_loss=}")
-
-print(f"{avg_cond_prob=}")
-
-total_loss = -true_conditionals.sum(axis=1)
-print(f"{total_loss=}")
-print([res['short_ln_loss'] for res in log_dict['results']])
-plt.plot(avg_log_loss)
-# plt.plot(avg_cond_prob)
+with open('binary_batch_log_dict.pkl', 'rb') as f:
+    binary_batch, log_dict = pickle.load(f)
 
 # %%
-# Prompt design 
+if False:
+    config = transformer.TransformerConfig(vocab_size=alphabet_size)
+    model = hk.transform(
+        functools.partial(transformer.transformer_decoder, config=config)
+    )
+    fname = "params_mid_train.npz"
+    with open(fname, "rb") as f:
+        loaded_params = np.load(f, allow_pickle=True)
+        params = dict(loaded_params)
+        for k in params.keys():
+            params[k] = params[k].item()
+    conditionals = model.apply(
+        params=params,
+        targets=binary_batch,
+        rng=None,
+    )
+    print(f"{conditionals.shape=}")
+    true_conditionals = jnp.take_along_axis(
+        conditionals, binary_batch[..., None], axis=-1
+    )[..., 0]
+    true_conditionals = jnp.where(log_dict['loss_mask'], 0.0, true_conditionals)
+    print(true_conditionals)
+    cond_probs = jax.numpy.exp(true_conditionals) # don't take seriously, check mask
 
-# string samples
-prompt = "The following binary sequence was generated by a simple program, represented as comma-separated bits of output: "
+    avg_log_loss = -true_conditionals.mean(axis=0)
+    avg_cond_prob = cond_probs.mean(0)
+    print(f"{avg_log_loss=}")
 
-str_batch = [
-    prompt + ','.join([str(digit) for digit in sample]) for sample in binary_batch 
-]
-print(str_batch[0])
-print(len(str_batch))
+    print(f"{avg_cond_prob=}")
 
-
+    total_loss = -true_conditionals.sum(axis=1)
+    print(f"{total_loss=}")
+    print([res['short_ln_loss'] for res in log_dict['results']])
+    plt.plot(avg_log_loss)
+    # plt.plot(avg_cond_prob)
 
 # %%
+# Spin up model
 import torch
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 
@@ -136,7 +127,7 @@ from transformers import GPT2Tokenizer, GPT2LMHeadModel
 
 # Load GPT-2 and tokenizer
 model_name = "gpt2"
-tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+tokenizer = GPT2Tokenizer.from_pretrained(model_name,add_bos_token=True)
 model = GPT2LMHeadModel.from_pretrained(model_name)
 model.eval()
 
@@ -144,61 +135,94 @@ model.eval()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
-# Input text
-text = "The quick brown fox jumps over the lazy dog."
+total_log_probs = torch.zeros_like(torch.tensor(binary_ex))
+examples_at_seq_pos = np.zeros(binary_ex.shape)
 
-# Tokenize input
-inputs = tokenizer(str_batch, return_tensors="pt")
-print(inputs)
-input_ids = inputs["input_ids"].to(device)
-
-# Run model
-with torch.no_grad():
-    outputs = model(input_ids, labels=input_ids)
-    logits = outputs.logits
-
-# Shift logits and labels to compute log probabilities
-log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
-# Gather log probabilities of the correct tokens
-# [batch_size, seq_len, vocab_size] -> [batch_size, seq_len]
-token_log_probs = log_probs.gather(2, input_ids.unsqueeze(-1)).squeeze(-1)
-
-# Decode tokens and print with log probs
-tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
-for token, log_prob in zip(tokens, token_log_probs[0]):
-    print(f"{token:>12} : {log_prob.item():.4f}")
-
-
-
-
-# still need to handle masking, see _make_loss_fn
-# %%
-# Evaluate LLMs
-from anthropic import Anthropic
-from openai import OpenAI
-
-from pprint import pprint
-
-assert os.getenv("OPENAI_API_KEY") is not None, "You must set your OpenAI API key - see instructions in dropdown"
-assert os.getenv("ANTHROPIC_API_KEY") is not None, "You must set your Anthropic API key - see instructions in dropdown"
-
-# OPENAI_API_KEY
-
-openai_client = OpenAI()
-anthropic_client = Anthropic()
+# %% 
+def get_bit_log_probs(logits):
+    # zero and one logits
+    batch, seq_len, toks = logits.shape
+    print(f"{logits.shape=}")
+    bit_logits = torch.index_select(
+        logits,
+        1,
+        2* torch.arange(seq_len//2).to(device),
+    ) 
+    print(f"{bit_logits.shape=}")
+    # Note that for gpt2 tokenizer, 0->15, 1->16
+    projected_logits = bit_logits[...,15:17]
+    renormalized_log_probs = torch.nn.functional.log_softmax(projected_logits, dim=-1)
+    return renormalized_log_probs
 
 # %%
-response = openai_client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the capital of France?"},
-    ],
-    n=2,
-    logprobs=True,
-)
+for i in range(binary_batch.shape[0]):
+    binary_ex = binary_batch[i][None,...]
+    real_seq = np.array(1 - log_dict['loss_mask'][i])
+    print(binary_ex)
+    # Prompt design 
 
-pprint(response.model_dump())  # See the entire ChatCompletion object, as a dict (more readable)
-print("\n", response.choices[0].message.content)  # See the response message only
+    # string samples
+    prompt = "" #"The following binary sequence was generated by a simple program, represented as comma-separated bits of output: "
+
+    digit_names = {0: "zero", 1: "one"}
+
+    #binary_batch = [256*[0]]
+
+    str_ex = [
+        prompt + ','.join([str(digit) for digit in sample]) for sample in binary_ex 
+    ]
+    #str_batch = [80*"This is a very repetitive sequence. ",]
+
+    print(str_ex[0])
+    print(len(str_ex))
+
+    # Tokenize input
+    inputs = tokenizer(str_ex, return_tensors="pt")
+    print(f"{inputs=}")
+    input_ids = inputs["input_ids"].to(device)
+
+    # Run model
+    with torch.no_grad():
+        outputs = model(input_ids, labels=input_ids)
+        logits = outputs.logits
+
+    bit_log_probs = get_bit_log_probs(logits)
+
+    # Select true surprisals
+    true_bit_log_probs = bit_log_probs.gather(2, torch.tensor(binary_ex).to(device)[...,None]).squeeze(-1)
+    print(f"{true_bit_log_probs.shape=}")
+
+    total_log_probs += true_bit_log_probs.cpu().numpy() * real_seq
+    examples_at_seq_pos += real_seq
+
 # %%
+# Get ALL log probs
+if False:
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+    # Gather log probabilities of the correct tokens
+    # [batch_size, seq_len, vocab_size] -> [batch_size, seq_len]
+    token_log_probs = log_probs[:, :-1].gather(2, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+
+    # Decode tokens and print with log probs
+    tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
+    for token, log_prob in zip(tokens, token_log_probs[0]):
+        print(f"{token:>12} : {log_prob.item():.4f}")
+
+
+# %%
+# Plotting
+surprisal = -(total_log_probs[0].cpu().numpy() / examples_at_seq_pos)
+print(surprisal.shape)
+print(surprisal)
+cum_surprisal = surprisal.cumsum(axis=-1)
+print(f"{cum_surprisal=}")
+
+plt.plot(cum_surprisal)
+plt.title(f'{model_name} surprise on samples')
+plt.xlabel('Token position')
+plt.ylabel('Cumulative ln loss')
+print([res['short_ln_loss'] for res in log_dict['results']])
+
+# %%
+
