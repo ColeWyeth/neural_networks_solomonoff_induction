@@ -54,7 +54,7 @@ if generate_fresh_batch:
         use_input_instruction = probabilistic,
     )
     data_generator = utm_dg_lib.UTMDataGenerator(
-        batch_size=1000,
+        batch_size=50,
         seq_length=256,
         rng=rng,
         utm=utm,
@@ -135,7 +135,21 @@ model.eval()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
-total_log_probs = torch.zeros_like(torch.tensor(binary_ex))
+# Set up SIT
+config = transformer.TransformerConfig(vocab_size=alphabet_size)
+model_sit = hk.transform(
+    functools.partial(transformer.transformer_decoder, config=config)
+)
+fname = "params.npz"
+with open(fname, "rb") as f:
+    loaded_params = np.load(f, allow_pickle=True)
+    params = dict(loaded_params)
+    for k in params.keys():
+        params[k] = params[k].item()
+
+
+total_log_probs_gpt = torch.zeros_like(torch.tensor(binary_ex))
+total_log_probs_sit = np.zeros(binary_ex.shape)
 examples_at_seq_pos = np.zeros(binary_ex.shape)
 
 # %% 
@@ -192,7 +206,19 @@ for i in range(binary_batch.shape[0]):
     true_bit_log_probs = bit_log_probs.gather(2, torch.tensor(binary_ex).to(device)[...,None]).squeeze(-1)
     print(f"{true_bit_log_probs.shape=}")
 
-    total_log_probs += true_bit_log_probs.cpu().numpy() * real_seq
+    # SIT
+    conditionals = model_sit.apply(
+        params=params,
+        targets=binary_ex,
+        rng=None,
+    )
+    print(f"{conditionals.shape=}")
+    true_conditionals = jnp.take_along_axis(
+        conditionals, binary_ex[..., None], axis=-1
+    )[..., 0]
+
+    total_log_probs_sit += np.array(true_conditionals)
+    total_log_probs_gpt += true_bit_log_probs.cpu().numpy() * real_seq
     examples_at_seq_pos += real_seq
 
 # %%
@@ -212,13 +238,20 @@ if False:
 
 # %%
 # Plotting
-surprisal = -(total_log_probs[0].cpu().numpy() / examples_at_seq_pos)
-print(surprisal.shape)
-print(surprisal)
-cum_surprisal = surprisal.cumsum(axis=-1)
-print(f"{cum_surprisal=}")
+print(f"{total_log_probs.shape=}")
+surprisal_gpt = -(total_log_probs_gpt[0].cpu().numpy() / examples_at_seq_pos[0])
+print(surprisal_gpt.shape)
+#print(surprisal)
+cum_surprisal_gpt = surprisal_gpt.cumsum(axis=-1)
+print(f"{cum_surprisal_gpt.shape=}")
 
-plt.plot(cum_surprisal)
+surprisal_sit = -(total_log_probs_sit[0] / examples_at_seq_pos[0])
+cum_surprisal_sit = surprisal_sit.cumsum(axis=-1)
+
+plt.plot(cum_surprisal_gpt,label='gpt')
+plt.plot(cum_surprisal_sit,label='sit')
+plt.legend()
+
 plt.title(f'{model_name} surprise on samples')
 plt.xlabel('Token position')
 plt.ylabel('Cumulative ln loss')
