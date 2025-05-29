@@ -145,14 +145,22 @@ for i in range(min(binary_batch.shape[0], 20)):
 
 # Spin up model
 import torch
-from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Model
 
 #torch.cuda.empty_cache()
 
 # Load GPT-2 and tokenizer
-model_name = "gpt2-large"
+model_name = "gpt2-xl"
 tokenizer = GPT2Tokenizer.from_pretrained(model_name,add_bos_token=True)
 model = GPT2LMHeadModel.from_pretrained(model_name)
+#model = GPT2Model.from_pretrained(model_name, from_tf=True)
+
+# from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-j-6B")
+# model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-j-6B")
+
+
 model.eval()
 
 # Set device to GPU if available
@@ -176,7 +184,7 @@ def get_bit_log_probs(logits):
 
 total_log_probs_gpt = np.zeros((seq_len,))
 
-for i in range(binary_batch.shape[0]):
+for i in range(1):#binary_batch.shape[0]):
     binary_ex = binary_batch[i][None,...]
     real_seq = np.array(1 - log_dict['loss_mask'][i])
     #print(binary_ex)
@@ -311,10 +319,14 @@ plt.ylabel('Token ln loss')
 #print([res['short_ln_loss'] for res in log_dict['results']])
 # %%
 # Comparison across gpt versions
+
+# with open('surprisals.pkl', 'rb') as f:
+#     surprisal_dict = pickle.load(f)
+
 surprisal_dict[model_name] = surprisal_gpt
 surprisal_dict['sit'] = surprisal_sit
 
-with open('surprisals.pkl', 'wb') as f:
+with open(f'surprisals_{num_examples}.pkl', 'wb') as f:
     pickle.dump(surprisal_dict, f)
 
 for mn in surprisal_dict.keys():
@@ -336,4 +348,14 @@ plt.title(f'Cumulative surprise on samples')
 plt.xlabel('Token position')
 plt.ylabel('Cumulative ln loss')
 print([res['short_ln_loss'] for res in log_dict['results']])
+# %%
+from neural_networks_solomonoff_induction.models.ctw import CTWPredictor
+
+with open('ctw_params.pkl','rb') as f:
+    params = pickle.load(f)
+
+predictor = CTWPredictor(0, batched_update=True)
+predictions, _, new_params, _, loss_dict = predictor.update(params, batch)
+print(loss_dict)
+
 # %%
