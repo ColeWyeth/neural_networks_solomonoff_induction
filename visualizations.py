@@ -54,7 +54,7 @@ if generate_fresh_batch:
         use_input_instruction = probabilistic,
     )
     data_generator = utm_dg_lib.UTMDataGenerator(
-        batch_size=50,
+        batch_size=500,
         seq_length=256,
         rng=rng,
         utm=utm,
@@ -126,7 +126,7 @@ from transformers import GPT2Tokenizer, GPT2LMHeadModel
 #torch.cuda.empty_cache()
 
 # Load GPT-2 and tokenizer
-model_name = "gpt2"
+model_name = "gpt2-medium"
 tokenizer = GPT2Tokenizer.from_pretrained(model_name,add_bos_token=True)
 model = GPT2LMHeadModel.from_pretrained(model_name)
 model.eval()
@@ -148,6 +148,7 @@ with open(fname, "rb") as f:
         params[k] = params[k].item()
 
 
+binary_ex = binary_batch[0][None,...]
 total_log_probs_gpt = torch.zeros_like(torch.tensor(binary_ex))
 total_log_probs_sit = np.zeros(binary_ex.shape)
 examples_at_seq_pos = np.zeros(binary_ex.shape)
@@ -238,7 +239,7 @@ if False:
 
 # %%
 # Plotting
-print(f"{total_log_probs.shape=}")
+print(f"{total_log_probs_gpt.shape=}")
 surprisal_gpt = -(total_log_probs_gpt[0].cpu().numpy() / examples_at_seq_pos[0])
 print(surprisal_gpt.shape)
 #print(surprisal)
