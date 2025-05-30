@@ -13,7 +13,7 @@ from neural_networks_solomonoff_induction.models import transformer
 from neural_networks_solomonoff_induction.models.ctw import CTWPredictor
 
 
-depth = 0
+depth = 15
 alphabet_size = 2
 probabilistic = True
 length = 256
